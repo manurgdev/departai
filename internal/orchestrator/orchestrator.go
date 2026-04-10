@@ -12,6 +12,7 @@ import (
 	"github.com/manurgdev/departai/internal/agent"
 	claudeagent "github.com/manurgdev/departai/internal/agent/claude"
 	"github.com/manurgdev/departai/internal/tasklog"
+	"github.com/manurgdev/departai/internal/ui"
 )
 
 // defaultBaseInstructions is embedded when no --instructions file is provided.
@@ -71,7 +72,9 @@ type Config struct {
 	WorkDir          string // directory where agents do their work
 	Prompt           string // original task from the user
 	InstructionsFile string // optional path to a custom base instructions file
-	MaxTurns         int    // safety cap; 0 defaults to 20
+	MaxTurns         int    // safety cap; 0 defaults to 10
+	AgentBackend     string // which CLI backend to use (currently only "claude")
+	Model            string // model override passed to the backend (optional)
 }
 
 // Orchestrator manages the sequential agent relay until consensus or max turns.
@@ -85,7 +88,10 @@ type Orchestrator struct {
 // New creates and initialises a new Orchestrator, including the task directory.
 func New(cfg Config) (*Orchestrator, error) {
 	if cfg.MaxTurns <= 0 {
-		cfg.MaxTurns = 20
+		cfg.MaxTurns = 10
+	}
+	if cfg.AgentBackend == "" {
+		cfg.AgentBackend = "claude"
 	}
 
 	baseInstr, err := loadInstructions(cfg.InstructionsFile)
@@ -98,10 +104,9 @@ func New(cfg Config) (*Orchestrator, error) {
 		return nil, fmt.Errorf("creating task log: %w", err)
 	}
 
-	// Two Claude Code CLI agents alternating turns.
-	agents := []agent.Agent{
-		claudeagent.New("Agent Alpha"),
-		claudeagent.New("Agent Beta"),
+	agents, err := buildAgents(cfg)
+	if err != nil {
+		return nil, err
 	}
 
 	return &Orchestrator{
@@ -112,47 +117,61 @@ func New(cfg Config) (*Orchestrator, error) {
 	}, nil
 }
 
+// buildAgents constructs the two agent instances based on the configured backend.
+func buildAgents(cfg Config) ([]agent.Agent, error) {
+	switch cfg.AgentBackend {
+	case "claude", "":
+		return []agent.Agent{
+			claudeagent.NewWithModel("Agent Alpha", cfg.Model),
+			claudeagent.NewWithModel("Agent Beta", cfg.Model),
+		}, nil
+	default:
+		return nil, fmt.Errorf("unknown agent backend %q (supported: claude)", cfg.AgentBackend)
+	}
+}
+
 // Run executes the relay loop. It returns nil on successful completion (consensus
 // or max-turns reached) and an error only on infrastructure failures.
 func (o *Orchestrator) Run() error {
-	fmt.Printf("DepartAI — task started\n")
-	fmt.Printf("  Task ID  : %s\n", o.taskLog.TaskID)
-	fmt.Printf("  Task dir : %s\n", o.taskLog.Dir)
-	fmt.Printf("  Work dir : %s\n", o.cfg.WorkDir)
-	fmt.Println()
+	ui.Header(o.taskLog.TaskID, o.taskLog.Dir, o.cfg.WorkDir)
 
 	ctx := context.Background()
 
 	for turn := 1; turn <= o.cfg.MaxTurns; turn++ {
 		ag := o.agents[(turn-1)%len(o.agents)]
 
-		fmt.Printf("[Turn %d/%d] %s working...\n", turn, o.cfg.MaxTurns, ag.Name())
-		start := time.Now()
+		ui.TurnHeader(turn, o.cfg.MaxTurns, ag.Name())
 
 		prompt, err := o.buildPrompt(turn, ag.Name())
 		if err != nil {
 			return fmt.Errorf("building prompt for turn %d: %w", turn, err)
 		}
 
-		result, err := ag.RunTurn(ctx, o.cfg.WorkDir, prompt)
+		start := time.Now()
+		var result agent.TurnResult
 
-		// Always save raw logs, even if the turn errored, so we have full diagnostics.
+		runErr := ui.RunWithSpinner(ag.Name()+" working…", func() error {
+			var e error
+			result, e = ag.RunTurn(ctx, o.cfg.WorkDir, prompt)
+			return e
+		})
+
+		elapsed := time.Since(start)
+
+		// Always persist raw logs — even on error, for diagnostics.
 		if logErr := o.taskLog.WriteRawLog(turn, ag.Name(), prompt, result.Output, result.Stderr); logErr != nil {
-			fmt.Printf("[Turn %d/%d] warning: could not write raw log: %v\n", turn, o.cfg.MaxTurns, logErr)
+			ui.Warning(fmt.Sprintf("could not write raw log: %v", logErr))
 		}
 
-		if err != nil {
-			return fmt.Errorf("turn %d (%s) failed: %w", turn, ag.Name(), err)
+		if runErr != nil {
+			return fmt.Errorf("turn %d (%s) failed: %w", turn, ag.Name(), runErr)
 		}
 
-		elapsed := time.Since(start).Round(time.Second)
-		fmt.Printf("[Turn %d/%d] %s done (%s)\n", turn, o.cfg.MaxTurns, ag.Name(), elapsed)
+		ui.TurnDone(turn, ag.Name(), elapsed, result.Output)
 
-		// If the agent worked in a different directory than our configured workDir,
-		// relocate the task directory to sit inside the actual project.
+		// Relocate task dir if the agent worked in a different directory.
 		if err := o.maybeRelocateTaskDir(); err != nil {
-			// Non-fatal: warn and continue with the current location.
-			fmt.Printf("[Turn %d/%d] warning: could not relocate task dir: %v\n", turn, o.cfg.MaxTurns, err)
+			ui.Warning(fmt.Sprintf("could not relocate task dir: %v", err))
 		}
 
 		// Need at least two turns before checking consensus.
@@ -162,19 +181,13 @@ func (o *Orchestrator) Run() error {
 				return fmt.Errorf("checking completion after turn %d: %w", turn, err)
 			}
 			if complete {
-				fmt.Println()
-				fmt.Println("Both agents agree: task is complete!")
-				fmt.Printf("Task log : %s\n", o.taskLog.Path())
-				fmt.Printf("Review   : %s\n", o.cfg.WorkDir)
+				ui.Success(o.taskLog.Path(), o.cfg.WorkDir)
 				return nil
 			}
 		}
 	}
 
-	fmt.Println()
-	fmt.Printf("Maximum turns (%d) reached without consensus.\n", o.cfg.MaxTurns)
-	fmt.Printf("Task log : %s\n", o.taskLog.Path())
-	fmt.Printf("Review   : %s\n", o.cfg.WorkDir)
+	ui.MaxTurnsReached(o.cfg.MaxTurns, o.taskLog.Path(), o.cfg.WorkDir)
 	return nil
 }
 
@@ -184,14 +197,13 @@ func (o *Orchestrator) Run() error {
 func (o *Orchestrator) maybeRelocateTaskDir() error {
 	reported, err := o.taskLog.ParseLastWorkingDir()
 	if err != nil || reported == "" {
-		return err // nothing reported yet, or read error
+		return err
 	}
 
 	if reported == filepath.Clean(o.cfg.WorkDir) {
-		return nil // already consistent
+		return nil
 	}
 
-	// Verify the reported path actually exists before trusting it.
 	if _, err := os.Stat(reported); err != nil {
 		return fmt.Errorf("agent reported working dir %q but it does not exist: %w", reported, err)
 	}
@@ -201,13 +213,12 @@ func (o *Orchestrator) maybeRelocateTaskDir() error {
 		return err
 	}
 
-	fmt.Printf("  Task dir relocated: %s\n    -> %s\n", oldDir, o.taskLog.Dir)
+	ui.Relocated(oldDir, o.taskLog.Dir)
 	o.cfg.WorkDir = reported
 	return nil
 }
 
 // buildPrompt constructs the full prompt string for a given agent turn.
-// It combines base instructions, project rules, the task log, and turn-specific directives.
 func (o *Orchestrator) buildPrompt(turnNumber int, agentName string) (string, error) {
 	taskLogContent, err := o.taskLog.Read()
 	if err != nil {
@@ -218,23 +229,19 @@ func (o *Orchestrator) buildPrompt(turnNumber int, agentName string) (string, er
 
 	var b strings.Builder
 
-	// Identity
 	fmt.Fprintf(&b, "# DepartAI — Turn %d\n\n", turnNumber)
 	fmt.Fprintf(&b, "You are **%s**, an AI coding agent in a two-agent relay team.\n\n", agentName)
 
-	// Base instructions
 	b.WriteString("## Agent Protocol\n\n")
 	b.WriteString(o.baseInstr)
 	b.WriteString("\n\n")
 
-	// Project rules (if any)
 	if projectRules != "" {
 		b.WriteString("## Project Rules\n\n")
 		b.WriteString(projectRules)
 		b.WriteString("\n\n")
 	}
 
-	// Current task log
 	b.WriteString("## Task Log\n\n")
 	fmt.Fprintf(&b, "File path: `%s`\n\n", o.taskLog.Path())
 	b.WriteString("Current contents:\n\n")
@@ -242,7 +249,6 @@ func (o *Orchestrator) buildPrompt(turnNumber int, agentName string) (string, er
 	b.WriteString(taskLogContent)
 	b.WriteString("\n```\n\n")
 
-	// Turn-specific instruction
 	b.WriteString("## Your Turn\n\n")
 	fmt.Fprintf(&b, "This is **Turn %d**. You are **%s**.\n\n", turnNumber, agentName)
 	b.WriteString("Steps:\n")

@@ -8,7 +8,9 @@ import (
 	"os"
 	"strings"
 
+	"github.com/manurgdev/departai/internal/config"
 	"github.com/manurgdev/departai/internal/orchestrator"
+	"github.com/manurgdev/departai/internal/ui"
 )
 
 const usage = `departai — AI agent orchestrator
@@ -23,11 +25,17 @@ Examples:
   departai "Build a REST API with user authentication"
   departai --dir /path/to/project "Add unit tests for the auth module"
   departai --instructions ./my-instructions.md "Refactor the database layer"
+  departai --model claude-opus-4-5 "Migrate the database schema"
+
+Configuration:
+  departai reads .departai.yml from the project directory, then
+  ~/.config/departai/config.yml, then uses built-in defaults.
+  CLI flags always take precedence over config file values.
 
 Flags:
 `
 
-// Run parses args and starts the orchestrator. It is the main entry point.
+// Run parses args, loads config, and starts the orchestrator.
 func Run(args []string) error {
 	fs := flag.NewFlagSet("departai", flag.ContinueOnError)
 	fs.Usage = func() {
@@ -36,9 +44,12 @@ func Run(args []string) error {
 		fmt.Fprintln(os.Stderr)
 	}
 
+	// CLI flags — zero values mean "not set by user; use config file value".
 	dir := fs.String("dir", "", "Working directory for agents (default: current directory)")
-	instructions := fs.String("instructions", "", "Path to a custom base instructions markdown file")
-	maxTurns := fs.Int("max-turns", 20, "Maximum number of agent turns before stopping")
+	instructionsFlag := fs.String("instructions", "", "Path to a custom base instructions markdown file")
+	maxTurnsFlag := fs.Int("max-turns", 0, "Maximum number of agent turns (default: 10, or from config)")
+	modelFlag := fs.String("model", "", "Model to use (e.g. claude-opus-4-5); overrides config")
+	backendFlag := fs.String("backend", "", "Agent backend to use (default: claude)")
 
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -54,6 +65,7 @@ func Run(args []string) error {
 
 	prompt := strings.Join(fs.Args(), " ")
 
+	// Resolve working directory first — config search depends on it.
 	workDir := *dir
 	if workDir == "" {
 		var err error
@@ -63,11 +75,34 @@ func Run(args []string) error {
 		}
 	}
 
+	// Load config (defaults → global → project), then overlay CLI flags.
+	cfg, err := config.Load(workDir)
+	if err != nil {
+		ui.Warning(fmt.Sprintf("config load error: %v — using defaults", err))
+		cfg = config.Defaults()
+	}
+
+	// CLI flags override config file values (only when explicitly provided).
+	if *maxTurnsFlag != 0 {
+		cfg.MaxTurns = *maxTurnsFlag
+	}
+	if *modelFlag != "" {
+		cfg.Model = *modelFlag
+	}
+	if *instructionsFlag != "" {
+		cfg.InstructionsFile = *instructionsFlag
+	}
+	if *backendFlag != "" {
+		cfg.AgentBackend = *backendFlag
+	}
+
 	orch, err := orchestrator.New(orchestrator.Config{
 		WorkDir:          workDir,
 		Prompt:           prompt,
-		InstructionsFile: *instructions,
-		MaxTurns:         *maxTurns,
+		InstructionsFile: cfg.InstructionsFile,
+		MaxTurns:         cfg.MaxTurns,
+		AgentBackend:     cfg.AgentBackend,
+		Model:            cfg.Model,
 	})
 	if err != nil {
 		return fmt.Errorf("initialising orchestrator: %w", err)

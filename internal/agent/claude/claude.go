@@ -12,12 +12,18 @@ import (
 
 // Agent runs turns by spawning the `claude` CLI process in non-interactive mode.
 type Agent struct {
-	name string
+	name  string
+	model string // optional: passed as --model if non-empty
 }
 
 // New creates a Claude Code CLI agent with the given display name.
 func New(name string) *Agent {
 	return &Agent{name: name}
+}
+
+// NewWithModel creates a Claude Code CLI agent that uses a specific model.
+func NewWithModel(name, model string) *Agent {
+	return &Agent{name: name, model: model}
 }
 
 func (a *Agent) Name() string {
@@ -28,11 +34,16 @@ func (a *Agent) Name() string {
 // and waits for it to finish. The agent is expected to write its turn summary
 // to the shared task log file as part of its work.
 func (a *Agent) RunTurn(ctx context.Context, workDir string, prompt string) (agent.TurnResult, error) {
-	cmd := exec.CommandContext(ctx, "claude",
+	args := []string{
 		"--dangerously-skip-permissions",
 		"--output-format", "text",
 		"-p", prompt,
-	)
+	}
+	if a.model != "" {
+		args = append(args, "--model", a.model)
+	}
+
+	cmd := exec.CommandContext(ctx, "claude", args...)
 	cmd.Dir = workDir
 
 	var stdout, stderr bytes.Buffer

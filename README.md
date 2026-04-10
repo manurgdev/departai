@@ -25,15 +25,26 @@ User → departai "Build a REST API"
 
 ## Installation
 
+### Using go install (recommended)
+
+```bash
+go install github.com/manurgdev/departai@latest
+```
+
+> Requires Go 1.21+. The binary lands in `$(go env GOPATH)/bin` — make sure that's on your `$PATH`.
+
+### Build from source
+
 ```bash
 git clone https://github.com/manurgdev/departai
 cd departai
 go build -o departai .
-# Optionally move to PATH:
-mv departai /usr/local/bin/departai
+mv departai /usr/local/bin/departai   # or anywhere on $PATH
 ```
 
-**Prerequisite:** [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) must be installed and authenticated.
+### Prerequisite
+
+[Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) must be installed and authenticated:
 
 ```bash
 npm install -g @anthropic-ai/claude-code
@@ -49,12 +60,56 @@ departai "Build a REST API with user authentication"
 # Specify a target project directory
 departai --dir /path/to/project "Add unit tests for the payment module"
 
+# Use a specific Claude model
+departai --model claude-opus-4-5 "Migrate the database schema to Postgres"
+
 # Custom base instructions (override the built-in agent protocol)
 departai --instructions ./my-instructions.md "Refactor the database layer"
 
-# Limit the number of turns (default: 20)
-departai --max-turns 10 "Fix the failing CI pipeline"
+# Limit the number of turns
+departai --max-turns 6 "Fix the failing CI pipeline"
 ```
+
+## Configuration
+
+departai supports a YAML config file. Settings are loaded in this order (later layers win):
+
+1. Built-in defaults
+2. `~/.config/departai/config.yml` — user-global settings
+3. `<project-dir>/.departai.yml` — project-level settings
+4. CLI flags — always take highest precedence
+
+### Config file format
+
+```yaml
+# .departai.yml
+
+# Which CLI backend to use. Currently only "claude" is supported.
+agent_backend: claude
+
+# Maximum number of agent turns before stopping (safety cap).
+max_turns: 10
+
+# Model to pass to the backend (optional).
+# If omitted, the backend uses its own default.
+model: claude-opus-4-5
+
+# Path to a custom base instructions markdown file (optional).
+# instructions_file: ./my-instructions.md
+```
+
+Place `.departai.yml` in your project root to set per-project defaults, or in
+`~/.config/departai/config.yml` for user-wide defaults.
+
+## Flags
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--dir` | current directory | Working directory where agents operate |
+| `--model` | (backend default) | Model to use (e.g. `claude-opus-4-5`) |
+| `--backend` | `claude` | Agent backend CLI to use |
+| `--instructions` | built-in | Path to a custom agent protocol markdown file |
+| `--max-turns` | `10` | Safety cap on the number of turns |
 
 ## Shared Context System
 
@@ -67,7 +122,9 @@ Each run creates a task directory at `.departai/tasks/<task-id>/` inside the wor
 └── .departai/
     └── tasks/
         └── 20240110-143022-build-rest-api/
-            └── task-log.md        ← shared handoff file
+            ├── task-log.md              ← structured handoff log
+            ├── turn-1-agent-alpha-raw.log   ← full prompt + stdout/stderr
+            └── turn-2-agent-beta-raw.log
 ```
 
 Add `.departai/` to your `.gitignore` or commit the logs — your choice.
@@ -77,18 +134,9 @@ Add `.departai/` to your `.gitignore` or commit the logs — your choice.
 Agents append structured turn summaries to `task-log.md`:
 
 ```markdown
-# Task Log
-
-**Task ID**: 20240110-143022-build-rest-api
-**Started**: 2024-01-10 14:30:22
-
-## Original Task
-
-Build a REST API with user authentication
-
----
-
 ## Turn 1 - Agent Alpha
+
+**Working Directory**: /path/to/project
 
 **What I did**: Scaffolded the Go project, created models for User and Session,
 set up the Gin router with /register and /login endpoints.
@@ -100,33 +148,26 @@ set up the Gin router with /register and /login endpoints.
 **Complete**: no
 
 ---
-
-## Turn 2 - Agent Beta
-
-**What I did**: Implemented JWT signing with HS256, added auth middleware,
-protected /profile endpoint, wrote integration tests.
-
-**Current State**: All endpoints work. Tests pass.
-
-**Next Steps**: None — task is complete.
-
-**Complete**: yes
-
----
 ```
 
 Consensus is reached when the last two consecutive turns both report `**Complete**: yes`.
 
+### Working Directory Auto-Detection
+
+If an agent discovers the actual project is in a different directory than `--dir`,
+it reports the real path in the `**Working Directory**` field. The orchestrator
+detects this, moves the task directory to the correct project, and continues
+subsequent turns from there.
+
 ### Project Rules
 
-At the start of each turn the orchestrator automatically reads and includes any project convention files it finds:
+At the start of each turn the orchestrator automatically reads and injects any
+project convention files it finds in the working directory:
 
 - `CLAUDE.md`
 - `AGENTS.md`
 - `.cursorrules`
 - `.github/copilot-instructions.md`
-
-Agents are instructed to follow these rules.
 
 ## Architecture
 
@@ -135,7 +176,11 @@ departai/
 ├── main.go
 └── internal/
     ├── cli/
-    │   └── cli.go              # flag parsing, wires orchestrator
+    │   └── cli.go              # flag parsing, config loading, wires orchestrator
+    ├── config/
+    │   └── config.go           # YAML config loading with layered merge
+    ├── ui/
+    │   └── ui.go               # styled terminal output + spinner
     ├── agent/
     │   ├── agent.go            # Agent interface + TurnResult type
     │   └── claude/
@@ -157,16 +202,12 @@ type Agent interface {
 }
 ```
 
-Then swap it in (or mix it in) via `orchestrator.New`. For example, a future Codex CLI backend would live at `internal/agent/codex/codex.go`.
-
-## Flags
-
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--dir` | current directory | Working directory where agents operate |
-| `--instructions` | built-in | Path to a custom agent protocol markdown file |
-| `--max-turns` | 20 | Safety cap on the number of turns |
+Then add a case to `buildAgents()` in `orchestrator.go`. For example, a future
+Codex CLI backend would live at `internal/agent/codex/codex.go` and be selected
+with `--backend codex` or `agent_backend: codex` in the config file.
 
 ## Completion Consensus
 
-The orchestrator checks the task log after each turn. It stops the loop and notifies you when both of the last two consecutive turns report `**Complete**: yes`. If `--max-turns` is reached first, it stops and asks you to review the current state.
+The orchestrator checks the task log after each turn. It stops and notifies you
+when the last two consecutive turns both report `**Complete**: yes`. If
+`--max-turns` is reached first, it stops and shows the current state for review.
