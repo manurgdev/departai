@@ -132,24 +132,25 @@ func WelcomeBanner(workDir, backend, model string, maxTurns int) {
 	}
 	faint.Printf("  Max turns : %d\n", maxTurns)
 	fmt.Println()
-	faint.Println("  Type a task to start, or \"help\" for commands.")
+	faint.Println("  Type a task to start, or /help for commands.")
 	fmt.Println()
-}
-
-// Prompt prints the interactive prompt (no trailing newline).
-func Prompt() {
-	boldCyan.Print("departai> ")
 }
 
 // InteractiveHelp prints the list of interactive commands.
 func InteractiveHelp() {
 	fmt.Println()
 	bold.Println("  Commands:")
-	fmt.Println("    help              Show this help message")
-	fmt.Println("    config            Show current configuration")
-	fmt.Println("    model             Show current model")
-	fmt.Println("    model <name>      Switch to a different model")
-	fmt.Println("    exit, quit        Exit departai")
+	fmt.Println("    /help                        Show this help message")
+	fmt.Println("    /config                      Show current configuration")
+	fmt.Println("    /config set <key> <value>    Set a config value for this session")
+	fmt.Println("    /config save                 Save config to project .departai/config.yml")
+	fmt.Println("    /config save global          Save config to ~/.departai/config.yml")
+	fmt.Println("    /model                       Show current model")
+	fmt.Println("    /model <name>                Set model for this session")
+	fmt.Println("    /exit, /quit                 Exit departai")
+	fmt.Println()
+	bold.Println("  Config keys:")
+	fmt.Println("    model, backend, max-turns, instructions")
 	fmt.Println()
 	bold.Println("  Usage:")
 	fmt.Println("    Type any other text to start a task with that prompt.")
@@ -172,6 +173,21 @@ func ShowModel(model string) {
 // ModelChanged prints a confirmation when the model is switched.
 func ModelChanged(model string) {
 	boldGreen.Printf("  ✓ Model set to %s\n", model)
+}
+
+// ConfigSet confirms a config key was changed.
+func ConfigSet(key, value string) {
+	boldGreen.Printf("  ✓ %s set to %s\n", key, value)
+}
+
+// ConfigSaved confirms a config file was written.
+func ConfigSaved(path string) {
+	boldGreen.Printf("  ✓ Config saved to %s\n", path)
+}
+
+// ConfigSetError prints an error related to /config commands.
+func ConfigSetError(msg string) {
+	boldRed.Printf("  ✗ %s\n", msg)
 }
 
 // ShowConfig prints the current configuration.

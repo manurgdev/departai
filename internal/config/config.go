@@ -27,36 +27,98 @@ func Defaults() Config {
 	}
 }
 
+// ── config file paths ──────────────────────────────────────────────────────
+
+// GlobalPath returns the path to the user-global config file: ~/.departai/config.yml
+func GlobalPath() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, ".departai", "config.yml")
+}
+
+// ProjectPath returns the path to the project-level config file:
+// <workDir>/.departai/config.yml
+func ProjectPath(workDir string) string {
+	return filepath.Join(workDir, ".departai", "config.yml")
+}
+
+// ── loading ────────────────────────────────────────────────────────────────
+
 // Load builds a Config for the given working directory by layering:
 //  1. Built-in defaults
-//  2. ~/.config/departai/config.yml   (user-global, lower priority)
-//  3. <workDir>/.departai.yml         (project-level, higher priority)
+//  2. ~/.departai/config.yml           (user-global, lower priority)
+//  3. <workDir>/.departai/config.yml   (project-level, higher priority)
+//
+// For backwards compatibility, the old locations (~/.config/departai/config.yml
+// and <workDir>/.departai.yml) are also checked as fallbacks.
 //
 // CLI flags are not applied here — the caller overlays them on top.
 func Load(workDir string) (Config, error) {
 	cfg := Defaults()
 
-	// Layer 1: user-global config
-	if home, err := os.UserHomeDir(); err == nil {
-		globalPath := filepath.Join(home, ".config", "departai", "config.yml")
-		if err := loadFile(globalPath, &cfg); err != nil {
+	// Layer 1: user-global config (try new path first, fall back to old)
+	for _, p := range []string{GlobalPath(), legacyGlobalPath()} {
+		if p == "" {
+			continue
+		}
+		if err := loadFile(p, &cfg); err != nil {
 			return cfg, fmt.Errorf("global config: %w", err)
+		}
+		if fileExists(p) {
+			break
 		}
 	}
 
-	// Layer 2: project config (.departai.yml or .departai.yaml)
+	// Layer 2: project config (try new path first, fall back to old)
+	projectPaths := []string{ProjectPath(workDir)}
 	for _, name := range []string{".departai.yml", ".departai.yaml"} {
-		path := filepath.Join(workDir, name)
-		if err := loadFile(path, &cfg); err != nil {
-			return cfg, fmt.Errorf("project config %s: %w", path, err)
+		projectPaths = append(projectPaths, filepath.Join(workDir, name))
+	}
+	for _, p := range projectPaths {
+		if err := loadFile(p, &cfg); err != nil {
+			return cfg, fmt.Errorf("project config %s: %w", p, err)
 		}
-		// stop at the first one found
-		if _, err := os.Stat(path); err == nil {
+		if fileExists(p) {
 			break
 		}
 	}
 
 	return cfg, nil
+}
+
+// ── saving ─────────────────────────────────────────────────────────────────
+
+// Save writes the config to the given path as YAML, creating parent
+// directories as needed.
+func (c Config) Save(path string) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		return fmt.Errorf("creating config directory: %w", err)
+	}
+
+	data, err := yaml.Marshal(c)
+	if err != nil {
+		return fmt.Errorf("marshalling config: %w", err)
+	}
+
+	header := "# departai configuration\n# See: https://github.com/manurgdev/departai\n\n"
+	return os.WriteFile(path, []byte(header+string(data)), 0644)
+}
+
+// ── internal helpers ───────────────────────────────────────────────────────
+
+func legacyGlobalPath() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, ".config", "departai", "config.yml")
+}
+
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
 }
 
 // loadFile reads and merges a YAML config file into dst.

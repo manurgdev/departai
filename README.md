@@ -5,20 +5,24 @@ An AI agent orchestrator CLI that runs two Claude Code agents in sequential turn
 ## How It Works
 
 ```
-User → departai "Build a REST API"
+User → departai
          │
          ▼
-   Orchestrator creates task directory + log
+   Interactive REPL with autocomplete
+         │
+         ├─► User types a task
          │
          ├─► Agent Alpha: reads log, works, appends turn summary (Complete: no)
          │
-         ├─► Agent Beta:  reads log, works, appends turn summary (Complete: no)
+         ├─► Agent Beta:  reads log, continues work, appends turn summary (Complete: no)
          │
-         ├─► Agent Alpha: reads log, works, appends turn summary (Complete: yes)
+         ├─► Agent Alpha: reads log, finishes work (Complete: yes)
          │
-         ├─► Agent Beta:  reads log, works, appends turn summary (Complete: yes)
+         ├─► Agent Beta:  verifies, confirms (Complete: yes)
          │
-         └─► Both agreed → notify user to review
+         ├─► Both agreed → user reviews changes
+         │
+         └─► User types next task or /exit
 ```
 
 **Why sequential turns?** Each agent gets a fresh context window. The task log is the handoff mechanism — each agent reads what was done and continues from there. This lets agents collaborate on tasks that would otherwise exhaust a single context window.
@@ -53,36 +57,101 @@ claude --version
 
 ## Usage
 
+### Interactive mode (default)
+
+Run `departai` with no arguments to start the interactive REPL:
+
 ```bash
-# Basic — works in the current directory
+departai
+```
+
+You'll see a prompt where you can type tasks directly or use slash commands with autocomplete:
+
+```
+  DepartAI — AI Agent Orchestrator
+
+  Work dir  : /Users/you/projects/my-app
+  Backend   : claude
+  Model     : (default)
+  Max turns : 10
+
+  Type a task to start, or /help for commands.
+
+departai> Build a REST API with user authentication
+```
+
+Type `/` to see a dropdown of available commands. Arrow keys navigate, Tab or Enter selects, and typing filters suggestions.
+
+### Direct mode
+
+Pass a prompt as an argument to run a single task and exit:
+
+```bash
+# Works in the current directory
 departai "Build a REST API with user authentication"
 
 # Specify a target project directory
 departai --dir /path/to/project "Add unit tests for the payment module"
 
-# Use a specific Claude model
+# Use a specific model
 departai --model claude-opus-4-5 "Migrate the database schema to Postgres"
-
-# Custom base instructions (override the built-in agent protocol)
-departai --instructions ./my-instructions.md "Refactor the database layer"
 
 # Limit the number of turns
 departai --max-turns 6 "Fix the failing CI pipeline"
 ```
 
+## Interactive Commands
+
+All commands use the `/` prefix. Autocomplete appears when you type `/` and filters as you continue typing.
+
+| Command | Description |
+|---------|-------------|
+| `/help` | Show all available commands |
+| `/config` | Show current configuration |
+| `/config set <key> <value>` | Set a config value for the current session |
+| `/config save` | Save current config to project `.departai/config.yml` |
+| `/config save global` | Save current config to `~/.departai/config.yml` |
+| `/model` | Show current model |
+| `/model <name>` | Switch to a different model |
+| `/exit`, `/quit` | Exit departai |
+
+`exit` and `quit` also work without the `/` prefix. You can also press **Ctrl+C** or **Ctrl+D** to exit.
+
+### Config keys for `/config set`
+
+| Key | Example | Description |
+|-----|---------|-------------|
+| `model` | `/config set model claude-opus-4-5` | Model to use |
+| `backend` | `/config set backend claude` | Agent backend |
+| `max-turns` | `/config set max-turns 6` | Max agent turns |
+| `instructions` | `/config set instructions ./my-rules.md` | Custom instructions file |
+
+## CLI Flags
+
+Flags work in both interactive and direct mode. In interactive mode, flags set the initial session config.
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--dir` | current directory | Working directory where agents operate |
+| `--model` | (backend default) | Model to use (e.g. `claude-opus-4-5`) |
+| `--backend` | `claude` | Agent backend CLI to use |
+| `--instructions` | built-in | Path to a custom agent protocol markdown file |
+| `--max-turns` | `10` | Safety cap on the number of turns |
+
 ## Configuration
 
-departai supports a YAML config file. Settings are loaded in this order (later layers win):
+departai uses YAML config files loaded in layers (later layers override earlier ones):
 
 1. Built-in defaults
-2. `~/.config/departai/config.yml` — user-global settings
-3. `<project-dir>/.departai.yml` — project-level settings
-4. CLI flags — always take highest precedence
+2. `~/.departai/config.yml` — user-global settings
+3. `<project>/.departai/config.yml` — project-level settings
+4. CLI flags
+5. Interactive `/config set` commands (session only, unless saved)
 
 ### Config file format
 
 ```yaml
-# .departai.yml
+# .departai/config.yml
 
 # Which CLI backend to use. Currently only "claude" is supported.
 agent_backend: claude
@@ -98,18 +167,18 @@ model: claude-opus-4-5
 # instructions_file: ./my-instructions.md
 ```
 
-Place `.departai.yml` in your project root to set per-project defaults, or in
-`~/.config/departai/config.yml` for user-wide defaults.
+### Managing config from the REPL
 
-## Flags
+```
+departai> /config set model claude-opus-4-5
+  ✓ model set to claude-opus-4-5
 
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--dir` | current directory | Working directory where agents operate |
-| `--model` | (backend default) | Model to use (e.g. `claude-opus-4-5`) |
-| `--backend` | `claude` | Agent backend CLI to use |
-| `--instructions` | built-in | Path to a custom agent protocol markdown file |
-| `--max-turns` | `10` | Safety cap on the number of turns |
+departai> /config save
+  ✓ Config saved to /path/to/project/.departai/config.yml
+
+departai> /config save global
+  ✓ Config saved to /Users/you/.departai/config.yml
+```
 
 ## Shared Context System
 
@@ -120,6 +189,7 @@ Each run creates a task directory at `.departai/tasks/<task-id>/` inside the wor
 ```
 <workdir>/
 └── .departai/
+    ├── config.yml                   ← project-level config (optional)
     └── tasks/
         └── 20240110-143022-build-rest-api/
             ├── task-log.md              ← structured handoff log
@@ -152,17 +222,22 @@ set up the Gin router with /register and /login endpoints.
 
 Consensus is reached when the last two consecutive turns both report `**Complete**: yes`.
 
+### Raw Turn Logs
+
+Every turn generates a raw log file containing:
+- The full prompt sent to the agent (base instructions + project rules + task log + turn directive)
+- The agent's complete stdout output
+- The agent's stderr output (if any)
+
+These are invaluable for debugging agent behavior.
+
 ### Working Directory Auto-Detection
 
-If an agent discovers the actual project is in a different directory than `--dir`,
-it reports the real path in the `**Working Directory**` field. The orchestrator
-detects this, moves the task directory to the correct project, and continues
-subsequent turns from there.
+If an agent discovers the actual project is in a different directory than `--dir`, it reports the real path in the `**Working Directory**` field. The orchestrator detects this after each turn, moves the task directory to the correct project, and continues subsequent turns from there.
 
 ### Project Rules
 
-At the start of each turn the orchestrator automatically reads and injects any
-project convention files it finds in the working directory:
+At the start of each turn the orchestrator automatically reads and injects any project convention files it finds in the working directory:
 
 - `CLAUDE.md`
 - `AGENTS.md`
@@ -176,19 +251,20 @@ departai/
 ├── main.go
 └── internal/
     ├── cli/
-    │   └── cli.go              # flag parsing, config loading, wires orchestrator
+    │   ├── cli.go              # flag parsing, config loading, mode selection
+    │   └── interactive.go      # REPL loop, go-prompt autocomplete, slash commands
     ├── config/
-    │   └── config.go           # YAML config loading with layered merge
+    │   └── config.go           # YAML config: load, save, layered merge
     ├── ui/
-    │   └── ui.go               # styled terminal output + spinner
+    │   └── ui.go               # styled terminal output, spinners, colors
     ├── agent/
     │   ├── agent.go            # Agent interface + TurnResult type
     │   └── claude/
     │       └── claude.go       # Claude Code CLI implementation
     ├── orchestrator/
-    │   └── orchestrator.go     # turn loop, prompt construction, consensus check
+    │   └── orchestrator.go     # turn loop, prompt builder, consensus check
     └── tasklog/
-        └── tasklog.go          # task directory creation, log read/write/parse
+        └── tasklog.go          # task directory, log read/write/parse, relocate
 ```
 
 ### Adding a New Agent Backend
@@ -202,12 +278,8 @@ type Agent interface {
 }
 ```
 
-Then add a case to `buildAgents()` in `orchestrator.go`. For example, a future
-Codex CLI backend would live at `internal/agent/codex/codex.go` and be selected
-with `--backend codex` or `agent_backend: codex` in the config file.
+Then add a case to `buildAgents()` in `orchestrator.go`. For example, a future Codex CLI backend would live at `internal/agent/codex/codex.go` and be selected with `--backend codex` or `agent_backend: codex` in the config file.
 
 ## Completion Consensus
 
-The orchestrator checks the task log after each turn. It stops and notifies you
-when the last two consecutive turns both report `**Complete**: yes`. If
-`--max-turns` is reached first, it stops and shows the current state for review.
+The orchestrator checks the task log after each turn. It stops and notifies you when the last two consecutive turns both report `**Complete**: yes`. If `--max-turns` is reached first, it stops and shows the current state for review.
