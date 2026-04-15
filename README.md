@@ -1,6 +1,6 @@
 # departai
 
-An AI agent orchestrator CLI that runs two Claude Code agents in sequential turns on a shared coding task. Agents hand off context through a shared task log until both agree the work is complete, then hands control back to you for review.
+An AI agent orchestrator CLI that runs two Claude Code agents in sequential turns on a shared coding task. Each agent can use its own model (e.g. Alpha on opus, Beta on sonnet). Agents hand off context through a shared task log until both agree the work is complete, then hands control back to you for review.
 
 ## How It Works
 
@@ -80,7 +80,7 @@ You'll see a prompt where you can type tasks directly or use slash commands with
 departai> Build a REST API with user authentication
 ```
 
-Type `/` to see a dropdown of available commands. Arrow keys navigate, Tab or Enter selects, and typing filters suggestions.
+Type `/` to see a dropdown of available commands. Arrow keys (or Tab) navigate, Enter selects, and typing filters suggestions. The dropdown is hierarchical — type `/config ` and it suggests subcommands; type `/config set ` and it suggests config keys.
 
 ### Direct mode
 
@@ -108,20 +108,64 @@ All commands use the `/` prefix. Autocomplete appears when you type `/` and filt
 |---------|-------------|
 | `/help` | Show all available commands |
 | `/config` | Show current configuration |
-| `/config set <key> <value>` | Set a config value for the current session |
+| `/config set <key> <value>` | Set a config value for the current session (validates if the key is a model) |
 | `/config save` | Save current config to project `.departai/config.yml` |
 | `/config save global` | Save current config to `~/.departai/config.yml` |
-| `/model` | Show current model |
-| `/model <name>` | Switch to a different model |
+| `/model` | Show global + per-agent models |
+| `/model <name>` | Set global model for both agents (validated) |
+| `/model alpha` | Show Agent Alpha's current model |
+| `/model alpha <name>` | Set Agent Alpha's model override (validated) |
+| `/model beta` | Show Agent Beta's current model |
+| `/model beta <name>` | Set Agent Beta's model override (validated) |
 | `/exit`, `/quit` | Exit departai |
 
 `exit` and `quit` also work without the `/` prefix. You can also press **Ctrl+C** or **Ctrl+D** to exit.
+
+### Per-agent models
+
+departai runs two sequential agents (Alpha and Beta) and you can give each a different model — for example, use a powerful model for the implementer and a cheaper one for the verifier:
+
+```
+departai> /model alpha claude-opus-4-5
+  ⠋ Validating claude-opus-4-5...
+  ✓ Agent Alpha model set to claude-opus-4-5
+
+departai> /model beta claude-sonnet-4-5
+  ⠋ Validating claude-sonnet-4-5...
+  ✓ Agent Beta model set to claude-sonnet-4-5
+
+departai> /model
+
+  Models:
+    Global       : (default)
+    Agent Alpha  : claude-opus-4-5
+    Agent Beta   : claude-sonnet-4-5
+```
+
+Resolution order per agent: the agent's override (`model_alpha` / `model_beta`) wins if set, otherwise the global `model` is used, otherwise the backend default.
+
+### Model validation
+
+Every time you set a model (via `/model`, `/model alpha|beta`, `/config set model*`, or the `--model` CLI flag), departai asks the backend whether it accepts that model name. If not, the session keeps the previous value:
+
+```
+departai> /model alpha totally-fake-model
+  ⠋ Validating totally-fake-model...
+
+  ✗ Model "totally-fake-model" rejected for Agent Alpha
+    There's an issue with the selected model (totally-fake-model). It may not exist or you may not have access to it.
+  Agent Alpha is unchanged.
+```
+
+Validation takes ~1–2 seconds and prevents typos from surfacing mid-task.
 
 ### Config keys for `/config set`
 
 | Key | Example | Description |
 |-----|---------|-------------|
-| `model` | `/config set model claude-opus-4-5` | Model to use |
+| `model` | `/config set model claude-opus-4-5` | Global model (both agents, validated) |
+| `model.alpha` | `/config set model.alpha claude-opus-4-5` | Override for Agent Alpha (validated) |
+| `model.beta` | `/config set model.beta claude-sonnet-4-5` | Override for Agent Beta (validated) |
 | `backend` | `/config set backend claude` | Agent backend |
 | `max-turns` | `/config set max-turns 6` | Max agent turns |
 | `instructions` | `/config set instructions ./my-rules.md` | Custom instructions file |
@@ -133,10 +177,12 @@ Flags work in both interactive and direct mode. In interactive mode, flags set t
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--dir` | current directory | Working directory where agents operate |
-| `--model` | (backend default) | Model to use (e.g. `claude-opus-4-5`) |
+| `--model` | (backend default) | Global model to use (e.g. `claude-opus-4-5`). Validated on startup. |
 | `--backend` | `claude` | Agent backend CLI to use |
 | `--instructions` | built-in | Path to a custom agent protocol markdown file |
 | `--max-turns` | `10` | Safety cap on the number of turns |
+
+If `--model` is rejected by the backend, departai exits immediately with the error — no task runs. Per-agent model overrides are only exposed through the REPL and config file, not the CLI flags.
 
 ## Configuration
 
@@ -159,9 +205,13 @@ agent_backend: claude
 # Maximum number of agent turns before stopping (safety cap).
 max_turns: 10
 
-# Model to pass to the backend (optional).
+# Global default model. Used by any agent that does not have its own override.
 # If omitted, the backend uses its own default.
 model: claude-opus-4-5
+
+# Per-agent overrides (optional). Each overrides the global `model` for that agent.
+model_alpha: claude-opus-4-5
+model_beta: claude-sonnet-4-5
 
 # Path to a custom base instructions markdown file (optional).
 # instructions_file: ./my-instructions.md
@@ -171,7 +221,12 @@ model: claude-opus-4-5
 
 ```
 departai> /config set model claude-opus-4-5
+  ⠋ Validating claude-opus-4-5...
   ✓ model set to claude-opus-4-5
+
+departai> /config set model.alpha claude-opus-4-5
+  ⠋ Validating claude-opus-4-5...
+  ✓ model.alpha set to claude-opus-4-5
 
 departai> /config save
   ✓ Config saved to /path/to/project/.departai/config.yml

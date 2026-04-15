@@ -145,34 +145,68 @@ func InteractiveHelp() {
 	fmt.Println("    /config set <key> <value>    Set a config value for this session")
 	fmt.Println("    /config save                 Save config to project .departai/config.yml")
 	fmt.Println("    /config save global          Save config to ~/.departai/config.yml")
-	fmt.Println("    /model                       Show current model")
-	fmt.Println("    /model <name>                Set model for this session")
+	fmt.Println("    /model                       Show all agent models")
+	fmt.Println("    /model <name>                Set global model for this session")
+	fmt.Println("    /model alpha [<name>]        Show/set Agent Alpha's model")
+	fmt.Println("    /model beta [<name>]         Show/set Agent Beta's model")
 	fmt.Println("    /exit, /quit                 Exit departai")
 	fmt.Println()
 	bold.Println("  Config keys:")
-	fmt.Println("    model, backend, max-turns, instructions")
+	fmt.Println("    model, model.alpha, model.beta, backend, max-turns, instructions")
 	fmt.Println()
 	bold.Println("  Usage:")
 	fmt.Println("    Type any other text to start a task with that prompt.")
-	fmt.Println("    Ctrl+D also exits.")
+	fmt.Println("    Ctrl+C or Ctrl+D also exits.")
 	fmt.Println()
 }
 
-// ShowModel prints the current model setting.
-func ShowModel(model string) {
+// ShowModel prints a single model setting (used by /model alpha and /model beta).
+func ShowModel(label, model string) {
 	fmt.Println()
 	if model != "" {
-		bold.Printf("  Model: %s\n", model)
+		bold.Printf("  %s: %s\n", label, model)
 	} else {
-		bold.Print("  Model: ")
+		bold.Printf("  %s: ", label)
 		faint.Println("(default)")
 	}
 	fmt.Println()
 }
 
-// ModelChanged prints a confirmation when the model is switched.
+// ShowModels prints the global default alongside per-agent overrides.
+// alpha and beta are the override values (may be empty); global is the fallback.
+func ShowModels(global, alpha, beta string) {
+	fmt.Println()
+	bold.Println("  Models:")
+	fmt.Printf("    Global       : %s\n", modelDisplay(global))
+	fmt.Printf("    Agent Alpha  : %s\n", modelDisplay(resolveModel(alpha, global)))
+	fmt.Printf("    Agent Beta   : %s\n", modelDisplay(resolveModel(beta, global)))
+	fmt.Println()
+}
+
+// ModelChanged prints a confirmation when the global model is switched.
 func ModelChanged(model string) {
 	boldGreen.Printf("  ✓ Model set to %s\n", model)
+}
+
+// ModelChangedFor prints a confirmation when a per-agent model is switched.
+func ModelChangedFor(agentName, model string) {
+	boldGreen.Printf("  ✓ %s model set to %s\n", agentName, model)
+}
+
+// modelDisplay returns the model name or "(default)" for empty values.
+func modelDisplay(model string) string {
+	if model == "" {
+		return "(default)"
+	}
+	return model
+}
+
+// resolveModel returns override if non-empty, else fallback.
+func resolveModel(override, fallback string) string {
+	if override != "" {
+		return override
+	}
+	return fallback
 }
 
 // ConfigSet confirms a config key was changed.
@@ -190,18 +224,33 @@ func ConfigSetError(msg string) {
 	boldRed.Printf("  ✗ %s\n", msg)
 }
 
-// ShowConfig prints the current configuration.
-func ShowConfig(workDir, backend, model string, maxTurns int) {
+// ValidationFailed prints a styled error when a model fails validation.
+// The caller is expected to keep the previous value in config (no revert here).
+func ValidationFailed(target, model, errMsg string) {
+	fmt.Println()
+	boldRed.Printf("  ✗ Model %q rejected for %s\n", model, target)
+	for _, line := range strings.Split(strings.TrimSpace(errMsg), "\n") {
+		faint.Printf("    %s\n", line)
+	}
+	faint.Printf("  %s is unchanged.\n", target)
+	fmt.Println()
+}
+
+// ShowConfig prints the current configuration, including per-agent model
+// overrides when they are set (non-empty).
+func ShowConfig(workDir, backend, model, modelAlpha, modelBeta string, maxTurns int) {
 	fmt.Println()
 	bold.Println("  Current configuration:")
-	fmt.Printf("    Work dir  : %s\n", workDir)
-	fmt.Printf("    Backend   : %s\n", backend)
-	if model != "" {
-		fmt.Printf("    Model     : %s\n", model)
-	} else {
-		fmt.Printf("    Model     : %s\n", "(default)")
+	fmt.Printf("    Work dir     : %s\n", workDir)
+	fmt.Printf("    Backend      : %s\n", backend)
+	fmt.Printf("    Model        : %s\n", modelDisplay(model))
+	if modelAlpha != "" {
+		fmt.Printf("    Model Alpha  : %s\n", modelAlpha)
 	}
-	fmt.Printf("    Max turns : %d\n", maxTurns)
+	if modelBeta != "" {
+		fmt.Printf("    Model Beta   : %s\n", modelBeta)
+	}
+	fmt.Printf("    Max turns    : %d\n", maxTurns)
 	fmt.Println()
 }
 

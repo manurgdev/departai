@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"strconv"
@@ -9,6 +10,7 @@ import (
 	goprompt "github.com/c-bata/go-prompt"
 	"golang.org/x/term"
 
+	claudeagent "github.com/manurgdev/departai/internal/agent/claude"
 	"github.com/manurgdev/departai/internal/config"
 	"github.com/manurgdev/departai/internal/orchestrator"
 	"github.com/manurgdev/departai/internal/ui"
@@ -47,14 +49,10 @@ func runInteractive(workDir string, cfg config.Config) error {
 			handleConfigCommand(strings.TrimPrefix(line, "/config"), workDir, cfgPtr)
 
 		case line == "/model":
-			ui.ShowModel(cfgPtr.Model)
+			ui.ShowModels(cfgPtr.Model, cfgPtr.ModelAlpha, cfgPtr.ModelBeta)
 
 		case strings.HasPrefix(line, "/model "):
-			newModel := strings.TrimSpace(strings.TrimPrefix(line, "/model "))
-			if newModel != "" {
-				cfgPtr.Model = newModel
-				ui.ModelChanged(newModel)
-			}
+			handleModelCommand(strings.TrimSpace(strings.TrimPrefix(line, "/model ")), cfgPtr)
 
 		case strings.HasPrefix(line, "/"):
 			ui.ConfigSetError(fmt.Sprintf("unknown command: %s (type /help for commands)", line))
@@ -115,7 +113,9 @@ var topLevelCommands = []goprompt.Suggest{
 	{Text: "/config", Description: "Show current configuration"},
 	{Text: "/config set", Description: "Set a config value"},
 	{Text: "/config save", Description: "Save config to file"},
-	{Text: "/model", Description: "Show or set the model"},
+	{Text: "/model", Description: "Show all agent models"},
+	{Text: "/model alpha", Description: "Show/set Agent Alpha's model"},
+	{Text: "/model beta", Description: "Show/set Agent Beta's model"},
 	{Text: "/exit", Description: "Exit departai"},
 	{Text: "/quit", Description: "Exit departai"},
 }
@@ -128,7 +128,9 @@ var configSubcommands = []goprompt.Suggest{
 
 // Keys for "/config set <key>".
 var configSetKeys = []goprompt.Suggest{
-	{Text: "model", Description: "Model name (e.g. claude-opus-4-5)"},
+	{Text: "model", Description: "Global model for both agents"},
+	{Text: "model.alpha", Description: "Override model for Agent Alpha"},
+	{Text: "model.beta", Description: "Override model for Agent Beta"},
 	{Text: "backend", Description: "Agent backend (e.g. claude)"},
 	{Text: "max-turns", Description: "Maximum agent turns (integer)"},
 	{Text: "instructions", Description: "Path to instructions markdown file"},
@@ -137,6 +139,12 @@ var configSetKeys = []goprompt.Suggest{
 // Targets for "/config save <target>".
 var configSaveTargets = []goprompt.Suggest{
 	{Text: "global", Description: "Save to ~/.departai/config.yml"},
+}
+
+// Subcommands for "/model <sub>".
+var modelSubcommands = []goprompt.Suggest{
+	{Text: "alpha", Description: "Show/set Agent Alpha's model"},
+	{Text: "beta", Description: "Show/set Agent Beta's model"},
 }
 
 // completer provides hierarchical, context-aware suggestions.
@@ -163,6 +171,11 @@ func completer(d goprompt.Document) []goprompt.Suggest {
 		return goprompt.FilterHasPrefix(configSubcommands, d.GetWordBeforeCursor(), true)
 	}
 
+	// "/model " → suggest agent-specific subcommands (alpha, beta)
+	if strings.HasPrefix(text, "/model ") {
+		return goprompt.FilterHasPrefix(modelSubcommands, d.GetWordBeforeCursor(), true)
+	}
+
 	// "/" → filter top-level commands
 	return goprompt.FilterHasPrefix(topLevelCommands, text, true)
 }
@@ -175,7 +188,7 @@ func handleConfigCommand(args string, workDir string, cfg *config.Config) {
 
 	switch {
 	case args == "":
-		ui.ShowConfig(workDir, cfg.AgentBackend, cfg.Model, cfg.MaxTurns)
+		ui.ShowConfig(workDir, cfg.AgentBackend, cfg.Model, cfg.ModelAlpha, cfg.ModelBeta, cfg.MaxTurns)
 
 	case strings.HasPrefix(args, "set "):
 		handleConfigSet(strings.TrimPrefix(args, "set "), cfg)
@@ -210,7 +223,7 @@ func handleConfigSet(kv string, cfg *config.Config) {
 	parts := strings.SplitN(strings.TrimSpace(kv), " ", 2)
 	if len(parts) < 2 || parts[1] == "" {
 		ui.ConfigSetError("usage: /config set <key> <value>")
-		ui.ConfigSetError("keys: model, backend, max-turns, instructions")
+		ui.ConfigSetError("keys: model, model.alpha, model.beta, backend, max-turns, instructions")
 		return
 	}
 
@@ -219,8 +232,22 @@ func handleConfigSet(kv string, cfg *config.Config) {
 
 	switch key {
 	case "model":
-		cfg.Model = value
-		ui.ConfigSet(key, value)
+		setModelValidated("Global model", value, func() {
+			cfg.Model = value
+			ui.ConfigSet(key, value)
+		})
+
+	case "model.alpha":
+		setModelValidated("Agent Alpha", value, func() {
+			cfg.ModelAlpha = value
+			ui.ConfigSet(key, value)
+		})
+
+	case "model.beta":
+		setModelValidated("Agent Beta", value, func() {
+			cfg.ModelBeta = value
+			ui.ConfigSet(key, value)
+		})
 
 	case "backend":
 		cfg.AgentBackend = value
@@ -240,8 +267,69 @@ func handleConfigSet(kv string, cfg *config.Config) {
 		ui.ConfigSet(key, value)
 
 	default:
-		ui.ConfigSetError(fmt.Sprintf("unknown key %q (valid: model, backend, max-turns, instructions)", key))
+		ui.ConfigSetError(fmt.Sprintf("unknown key %q (valid: model, model.alpha, model.beta, backend, max-turns, instructions)", key))
 	}
+}
+
+// handleModelCommand dispatches "/model <args>" where args comes after "/model ".
+//
+//   - "alpha"           → show Agent Alpha's current model
+//   - "alpha <name>"    → set Agent Alpha's model override
+//   - "beta"            → show Agent Beta's current model
+//   - "beta <name>"     → set Agent Beta's model override
+//   - "<name>"          → set global Model (any other single word)
+func handleModelCommand(args string, cfg *config.Config) {
+	parts := strings.SplitN(args, " ", 2)
+	first := strings.TrimSpace(parts[0])
+
+	switch strings.ToLower(first) {
+	case "alpha":
+		if len(parts) < 2 || strings.TrimSpace(parts[1]) == "" {
+			ui.ShowModel("Agent Alpha", cfg.ModelFor("alpha"))
+			return
+		}
+		value := strings.TrimSpace(parts[1])
+		setModelValidated("Agent Alpha", value, func() {
+			cfg.ModelAlpha = value
+			ui.ModelChangedFor("Agent Alpha", value)
+		})
+
+	case "beta":
+		if len(parts) < 2 || strings.TrimSpace(parts[1]) == "" {
+			ui.ShowModel("Agent Beta", cfg.ModelFor("beta"))
+			return
+		}
+		value := strings.TrimSpace(parts[1])
+		setModelValidated("Agent Beta", value, func() {
+			cfg.ModelBeta = value
+			ui.ModelChangedFor("Agent Beta", value)
+		})
+
+	default:
+		// Any other single word is treated as the global model name.
+		if first != "" {
+			setModelValidated("Global model", first, func() {
+				cfg.Model = first
+				ui.ModelChanged(first)
+			})
+		}
+	}
+}
+
+// setModelValidated runs ValidateModel for newValue with a spinner.
+// On success, invokes onSuccess (which commits the config change).
+// On failure, shows a validation error and does NOT call onSuccess.
+func setModelValidated(target, newValue string, onSuccess func()) {
+	var vErr error
+	_ = ui.RunWithSpinner(fmt.Sprintf("Validating %s...", newValue), func() error {
+		vErr = claudeagent.ValidateModel(context.Background(), newValue)
+		return nil
+	})
+	if vErr != nil {
+		ui.ValidationFailed(target, newValue, vErr.Error())
+		return
+	}
+	onSuccess()
 }
 
 // runTask creates an orchestrator for a single task prompt and runs it.
@@ -253,6 +341,8 @@ func runTask(workDir string, cfg config.Config, prompt string) error {
 		MaxTurns:         cfg.MaxTurns,
 		AgentBackend:     cfg.AgentBackend,
 		Model:            cfg.Model,
+		ModelAlpha:       cfg.ModelAlpha,
+		ModelBeta:        cfg.ModelBeta,
 	})
 	if err != nil {
 		return fmt.Errorf("initialising orchestrator: %w", err)

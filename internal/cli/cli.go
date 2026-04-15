@@ -2,12 +2,14 @@
 package cli
 
 import (
+	"context"
 	"errors"
 	"flag"
 	"fmt"
 	"os"
 	"strings"
 
+	claudeagent "github.com/manurgdev/departai/internal/agent/claude"
 	"github.com/manurgdev/departai/internal/config"
 	"github.com/manurgdev/departai/internal/ui"
 )
@@ -80,6 +82,11 @@ func Run(args []string) error {
 		cfg.MaxTurns = *maxTurnsFlag
 	}
 	if *modelFlag != "" {
+		// Validate the CLI-provided model against the backend before proceeding —
+		// catches typos at parse time instead of mid-task.
+		if err := claudeagent.ValidateModel(context.Background(), *modelFlag); err != nil {
+			return fmt.Errorf("--model %q rejected by claude: %s", *modelFlag, err)
+		}
 		cfg.Model = *modelFlag
 	}
 	if *instructionsFlag != "" {

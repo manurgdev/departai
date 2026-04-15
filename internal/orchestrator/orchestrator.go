@@ -74,7 +74,9 @@ type Config struct {
 	InstructionsFile string // optional path to a custom base instructions file
 	MaxTurns         int    // safety cap; 0 defaults to 10
 	AgentBackend     string // which CLI backend to use (currently only "claude")
-	Model            string // model override passed to the backend (optional)
+	Model            string // default model for all agents (optional)
+	ModelAlpha       string // override for Agent Alpha (optional)
+	ModelBeta        string // override for Agent Beta (optional)
 }
 
 // Orchestrator manages the sequential agent relay until consensus or max turns.
@@ -118,16 +120,25 @@ func New(cfg Config) (*Orchestrator, error) {
 }
 
 // buildAgents constructs the two agent instances based on the configured backend.
+// Each agent uses its per-agent model override if set, else the global Model.
 func buildAgents(cfg Config) ([]agent.Agent, error) {
 	switch cfg.AgentBackend {
 	case "claude", "":
 		return []agent.Agent{
-			claudeagent.NewWithModel("Agent Alpha", cfg.Model),
-			claudeagent.NewWithModel("Agent Beta", cfg.Model),
+			claudeagent.NewWithModel("Agent Alpha", modelOrDefault(cfg.ModelAlpha, cfg.Model)),
+			claudeagent.NewWithModel("Agent Beta", modelOrDefault(cfg.ModelBeta, cfg.Model)),
 		}, nil
 	default:
 		return nil, fmt.Errorf("unknown agent backend %q (supported: claude)", cfg.AgentBackend)
 	}
+}
+
+// modelOrDefault returns override if non-empty, otherwise fallback.
+func modelOrDefault(override, fallback string) string {
+	if override != "" {
+		return override
+	}
+	return fallback
 }
 
 // Run executes the relay loop. It returns nil on successful completion (consensus

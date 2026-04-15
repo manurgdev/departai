@@ -1,0 +1,92 @@
+package config
+
+import "testing"
+
+func TestModelFor(t *testing.T) {
+	cases := []struct {
+		name   string
+		cfg    Config
+		agent  string
+		expect string
+	}{
+		{
+			name:   "no overrides — falls back to global",
+			cfg:    Config{Model: "claude-opus"},
+			agent:  "alpha",
+			expect: "claude-opus",
+		},
+		{
+			name:   "alpha override is used",
+			cfg:    Config{Model: "claude-opus", ModelAlpha: "claude-sonnet"},
+			agent:  "alpha",
+			expect: "claude-sonnet",
+		},
+		{
+			name:   "beta override does not leak to alpha",
+			cfg:    Config{Model: "claude-opus", ModelBeta: "claude-sonnet"},
+			agent:  "alpha",
+			expect: "claude-opus",
+		},
+		{
+			name:   "beta override is used",
+			cfg:    Config{Model: "claude-opus", ModelBeta: "claude-haiku"},
+			agent:  "beta",
+			expect: "claude-haiku",
+		},
+		{
+			name:   "full agent name is accepted",
+			cfg:    Config{ModelAlpha: "claude-sonnet"},
+			agent:  "Agent Alpha",
+			expect: "claude-sonnet",
+		},
+		{
+			name:   "unknown agent falls back to global",
+			cfg:    Config{Model: "claude-opus", ModelAlpha: "claude-sonnet"},
+			agent:  "gamma",
+			expect: "claude-opus",
+		},
+		{
+			name:   "empty everything returns empty",
+			cfg:    Config{},
+			agent:  "alpha",
+			expect: "",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := tc.cfg.ModelFor(tc.agent)
+			if got != tc.expect {
+				t.Errorf("ModelFor(%q) = %q, want %q", tc.agent, got, tc.expect)
+			}
+		})
+	}
+}
+
+func TestMergePerAgentModels(t *testing.T) {
+	dst := Config{Model: "global", ModelAlpha: "old-alpha"}
+	src := Config{ModelAlpha: "new-alpha", ModelBeta: "new-beta"}
+
+	merge(&dst, src)
+
+	if dst.Model != "global" {
+		t.Errorf("Model: got %q, want %q", dst.Model, "global")
+	}
+	if dst.ModelAlpha != "new-alpha" {
+		t.Errorf("ModelAlpha: got %q, want %q", dst.ModelAlpha, "new-alpha")
+	}
+	if dst.ModelBeta != "new-beta" {
+		t.Errorf("ModelBeta: got %q, want %q", dst.ModelBeta, "new-beta")
+	}
+}
+
+func TestMergeDoesNotClobberWithEmpty(t *testing.T) {
+	dst := Config{Model: "keep", ModelAlpha: "keep-alpha", ModelBeta: "keep-beta"}
+	src := Config{} // all empty
+
+	merge(&dst, src)
+
+	if dst.Model != "keep" || dst.ModelAlpha != "keep-alpha" || dst.ModelBeta != "keep-beta" {
+		t.Errorf("empty src should not clobber dst; got %+v", dst)
+	}
+}

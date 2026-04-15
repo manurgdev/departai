@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -15,8 +16,27 @@ import (
 type Config struct {
 	AgentBackend     string `yaml:"agent_backend"`
 	MaxTurns         int    `yaml:"max_turns"`
-	Model            string `yaml:"model"`
+	Model            string `yaml:"model"`                  // default model for all agents
+	ModelAlpha       string `yaml:"model_alpha,omitempty"`  // override for Agent Alpha
+	ModelBeta        string `yaml:"model_beta,omitempty"`   // override for Agent Beta
 	InstructionsFile string `yaml:"instructions_file"`
+}
+
+// ModelFor returns the model to use for the given agent name, preferring
+// the agent-specific override and falling back to the global Model.
+// Accepts "alpha"/"beta" or full names like "Agent Alpha"/"Agent Beta".
+func (c Config) ModelFor(agentName string) string {
+	switch strings.ToLower(agentName) {
+	case "alpha", "agent alpha":
+		if c.ModelAlpha != "" {
+			return c.ModelAlpha
+		}
+	case "beta", "agent beta":
+		if c.ModelBeta != "" {
+			return c.ModelBeta
+		}
+	}
+	return c.Model
 }
 
 // Defaults returns the built-in baseline configuration.
@@ -151,6 +171,12 @@ func merge(dst *Config, src Config) {
 	}
 	if src.Model != "" {
 		dst.Model = src.Model
+	}
+	if src.ModelAlpha != "" {
+		dst.ModelAlpha = src.ModelAlpha
+	}
+	if src.ModelBeta != "" {
+		dst.ModelBeta = src.ModelBeta
 	}
 	if src.InstructionsFile != "" {
 		dst.InstructionsFile = src.InstructionsFile
