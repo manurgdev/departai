@@ -19,7 +19,7 @@ import (
 // runInteractive starts the REPL that lets users type tasks interactively.
 // Slash commands get autocomplete via go-prompt; everything else is a task prompt.
 func runInteractive(workDir string, cfg config.Config) error {
-	ui.WelcomeBanner(workDir, cfg.AgentBackend, cfg.Model, cfg.MaxTurns)
+	ui.WelcomeBanner(workDir, cfg.AgentBackend, cfg.Model, cfg.ModelAlpha, cfg.ModelBeta, cfg.InstructionsFile, cfg.MaxTurns)
 
 	// Save terminal state before go-prompt switches to raw mode.
 	// Needed for clean exit via Ctrl+C (os.Exit won't run defers).
@@ -52,7 +52,7 @@ func runInteractive(workDir string, cfg config.Config) error {
 			ui.ShowModels(cfgPtr.Model, cfgPtr.ModelAlpha, cfgPtr.ModelBeta)
 
 		case strings.HasPrefix(line, "/model "):
-			handleModelCommand(strings.TrimSpace(strings.TrimPrefix(line, "/model ")), cfgPtr)
+			handleModelCommand(strings.TrimSpace(strings.TrimPrefix(line, "/model ")), workDir, cfgPtr)
 
 		case strings.HasPrefix(line, "/"):
 			ui.ConfigSetError(fmt.Sprintf("unknown command: %s (type /help for commands)", line))
@@ -116,6 +116,7 @@ var topLevelCommands = []goprompt.Suggest{
 	{Text: "/model", Description: "Show all agent models"},
 	{Text: "/model alpha", Description: "Show/set Agent Alpha's model"},
 	{Text: "/model beta", Description: "Show/set Agent Beta's model"},
+	{Text: "/model unset", Description: "Clear the global model (falls back to backend default)"},
 	{Text: "/exit", Description: "Exit departai"},
 	{Text: "/quit", Description: "Exit departai"},
 }
@@ -145,6 +146,12 @@ var configSaveTargets = []goprompt.Suggest{
 var modelSubcommands = []goprompt.Suggest{
 	{Text: "alpha", Description: "Show/set Agent Alpha's model"},
 	{Text: "beta", Description: "Show/set Agent Beta's model"},
+	{Text: "unset", Description: "Clear the global model (falls back to backend default)"},
+}
+
+// Values suggested after "/model alpha " or "/model beta ".
+var modelValueSuggestions = []goprompt.Suggest{
+	{Text: "unset", Description: "Clear this agent's override (inherits global)"},
 }
 
 // completer provides hierarchical, context-aware suggestions.
@@ -161,9 +168,19 @@ func completer(d goprompt.Document) []goprompt.Suggest {
 		return goprompt.FilterHasPrefix(configSaveTargets, d.GetWordBeforeCursor(), true)
 	}
 
-	// "/config set " → suggest keys
+	// "/config set ..." → suggest keys while typing the key, or model values
+	// (e.g. "unset") while typing a value for a model key.
 	if strings.HasPrefix(text, "/config set ") {
-		return goprompt.FilterHasPrefix(configSetKeys, d.GetWordBeforeCursor(), true)
+		rest := strings.TrimPrefix(text, "/config set ")
+		parts := strings.SplitN(rest, " ", 2)
+		if len(parts) == 1 {
+			return goprompt.FilterHasPrefix(configSetKeys, d.GetWordBeforeCursor(), true)
+		}
+		switch parts[0] {
+		case "model", "model.alpha", "model.beta":
+			return goprompt.FilterHasPrefix(modelValueSuggestions, d.GetWordBeforeCursor(), true)
+		}
+		return nil
 	}
 
 	// "/config " → suggest subcommands
@@ -171,7 +188,12 @@ func completer(d goprompt.Document) []goprompt.Suggest {
 		return goprompt.FilterHasPrefix(configSubcommands, d.GetWordBeforeCursor(), true)
 	}
 
-	// "/model " → suggest agent-specific subcommands (alpha, beta)
+	// "/model alpha " or "/model beta " → suggest "unset" (values are otherwise free-form)
+	if strings.HasPrefix(text, "/model alpha ") || strings.HasPrefix(text, "/model beta ") {
+		return goprompt.FilterHasPrefix(modelValueSuggestions, d.GetWordBeforeCursor(), true)
+	}
+
+	// "/model " → suggest agent-specific subcommands (alpha, beta, unset)
 	if strings.HasPrefix(text, "/model ") {
 		return goprompt.FilterHasPrefix(modelSubcommands, d.GetWordBeforeCursor(), true)
 	}
@@ -191,7 +213,7 @@ func handleConfigCommand(args string, workDir string, cfg *config.Config) {
 		ui.ShowConfig(workDir, cfg.AgentBackend, cfg.Model, cfg.ModelAlpha, cfg.ModelBeta, cfg.MaxTurns)
 
 	case strings.HasPrefix(args, "set "):
-		handleConfigSet(strings.TrimPrefix(args, "set "), cfg)
+		handleConfigSet(strings.TrimPrefix(args, "set "), workDir, cfg)
 
 	case args == "save global":
 		path := config.GlobalPath()
@@ -219,7 +241,8 @@ func handleConfigCommand(args string, workDir string, cfg *config.Config) {
 }
 
 // handleConfigSet parses "key value" and updates the config.
-func handleConfigSet(kv string, cfg *config.Config) {
+// After any successful change, the user is prompted to save (project/global/session).
+func handleConfigSet(kv string, workDir string, cfg *config.Config) {
 	parts := strings.SplitN(strings.TrimSpace(kv), " ", 2)
 	if len(parts) < 2 || parts[1] == "" {
 		ui.ConfigSetError("usage: /config set <key> <value>")
@@ -232,26 +255,48 @@ func handleConfigSet(kv string, cfg *config.Config) {
 
 	switch key {
 	case "model":
+		if isUnsetValue(value) {
+			cfg.Model = ""
+			ui.ModelUnset("Global model", "backend default")
+			promptAndSave(workDir, *cfg)
+			return
+		}
 		setModelValidated("Global model", value, func() {
 			cfg.Model = value
 			ui.ConfigSet(key, value)
+			promptAndSave(workDir, *cfg)
 		})
 
 	case "model.alpha":
+		if isUnsetValue(value) {
+			cfg.ModelAlpha = ""
+			ui.ModelUnset("Agent Alpha override", "global")
+			promptAndSave(workDir, *cfg)
+			return
+		}
 		setModelValidated("Agent Alpha", value, func() {
 			cfg.ModelAlpha = value
 			ui.ConfigSet(key, value)
+			promptAndSave(workDir, *cfg)
 		})
 
 	case "model.beta":
+		if isUnsetValue(value) {
+			cfg.ModelBeta = ""
+			ui.ModelUnset("Agent Beta override", "global")
+			promptAndSave(workDir, *cfg)
+			return
+		}
 		setModelValidated("Agent Beta", value, func() {
 			cfg.ModelBeta = value
 			ui.ConfigSet(key, value)
+			promptAndSave(workDir, *cfg)
 		})
 
 	case "backend":
 		cfg.AgentBackend = value
 		ui.ConfigSet(key, value)
+		promptAndSave(workDir, *cfg)
 
 	case "max-turns":
 		n, err := strconv.Atoi(value)
@@ -261,10 +306,12 @@ func handleConfigSet(kv string, cfg *config.Config) {
 		}
 		cfg.MaxTurns = n
 		ui.ConfigSet(key, value)
+		promptAndSave(workDir, *cfg)
 
 	case "instructions":
 		cfg.InstructionsFile = value
 		ui.ConfigSet(key, value)
+		promptAndSave(workDir, *cfg)
 
 	default:
 		ui.ConfigSetError(fmt.Sprintf("unknown key %q (valid: model, model.alpha, model.beta, backend, max-turns, instructions)", key))
@@ -272,13 +319,14 @@ func handleConfigSet(kv string, cfg *config.Config) {
 }
 
 // handleModelCommand dispatches "/model <args>" where args comes after "/model ".
+// After any successful model change, the user is prompted to save (project/global/session).
 //
 //   - "alpha"           → show Agent Alpha's current model
 //   - "alpha <name>"    → set Agent Alpha's model override
 //   - "beta"            → show Agent Beta's current model
 //   - "beta <name>"     → set Agent Beta's model override
 //   - "<name>"          → set global Model (any other single word)
-func handleModelCommand(args string, cfg *config.Config) {
+func handleModelCommand(args string, workDir string, cfg *config.Config) {
 	parts := strings.SplitN(args, " ", 2)
 	first := strings.TrimSpace(parts[0])
 
@@ -289,9 +337,16 @@ func handleModelCommand(args string, cfg *config.Config) {
 			return
 		}
 		value := strings.TrimSpace(parts[1])
+		if isUnsetValue(value) {
+			cfg.ModelAlpha = ""
+			ui.ModelUnset("Agent Alpha override", "global")
+			promptAndSave(workDir, *cfg)
+			return
+		}
 		setModelValidated("Agent Alpha", value, func() {
 			cfg.ModelAlpha = value
 			ui.ModelChangedFor("Agent Alpha", value)
+			promptAndSave(workDir, *cfg)
 		})
 
 	case "beta":
@@ -300,20 +355,79 @@ func handleModelCommand(args string, cfg *config.Config) {
 			return
 		}
 		value := strings.TrimSpace(parts[1])
+		if isUnsetValue(value) {
+			cfg.ModelBeta = ""
+			ui.ModelUnset("Agent Beta override", "global")
+			promptAndSave(workDir, *cfg)
+			return
+		}
 		setModelValidated("Agent Beta", value, func() {
 			cfg.ModelBeta = value
 			ui.ModelChangedFor("Agent Beta", value)
+			promptAndSave(workDir, *cfg)
 		})
 
 	default:
-		// Any other single word is treated as the global model name.
-		if first != "" {
-			setModelValidated("Global model", first, func() {
-				cfg.Model = first
-				ui.ModelChanged(first)
-			})
+		// Any other single word is treated as the global model name,
+		// except "unset" which clears the global value.
+		if first == "" {
+			return
 		}
+		if isUnsetValue(first) {
+			cfg.Model = ""
+			ui.ModelUnset("Global model", "backend default")
+			promptAndSave(workDir, *cfg)
+			return
+		}
+		setModelValidated("Global model", first, func() {
+			cfg.Model = first
+			ui.ModelChanged(first)
+			promptAndSave(workDir, *cfg)
+		})
 	}
+}
+
+// isUnsetValue reports whether the given value means "clear this setting".
+// Accepts case-insensitive aliases so users can pick whichever feels natural.
+func isUnsetValue(v string) bool {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "unset", "clear", "reset", "none":
+		return true
+	}
+	return false
+}
+
+// promptAndSave asks the user (via an arrow-key menu) where to persist the
+// current config and writes the file if a scope other than "session" is chosen.
+func promptAndSave(workDir string, cfg config.Config) {
+	projectPath := config.ProjectPath(workDir)
+	globalPath := config.GlobalPath()
+	displayGlobal := globalPath
+	if displayGlobal == "" {
+		displayGlobal = "(home dir unavailable)"
+	}
+
+	scope := ui.PromptSaveScope(projectPath, displayGlobal)
+
+	var target string
+	switch scope {
+	case ui.SaveScopeProject:
+		target = projectPath
+	case ui.SaveScopeGlobal:
+		if globalPath == "" {
+			ui.ConfigSetError("cannot resolve home directory")
+			return
+		}
+		target = globalPath
+	default:
+		return // session-only, nothing to persist
+	}
+
+	if err := cfg.Save(target); err != nil {
+		ui.ConfigSetError(fmt.Sprintf("save failed: %v", err))
+		return
+	}
+	ui.ConfigSaved(target)
 }
 
 // setModelValidated runs ValidateModel for newValue with a spinner.

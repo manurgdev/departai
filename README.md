@@ -70,15 +70,27 @@ You'll see a prompt where you can type tasks directly or use slash commands with
 ```
   DepartAI — AI Agent Orchestrator
 
-  Work dir  : /Users/you/projects/my-app
-  Backend   : claude
-  Model     : (default)
-  Max turns : 10
+  Work dir     : /Users/you/projects/my-app
+  Backend      : claude
+  Max turns    : 10
+
+  Models:
+    Alpha Global : claude-opus-4-5
+    Alpha Local  : (not set)
+    Beta Global  : claude-opus-4-5
+    Beta Local   : claude-sonnet-4-5
 
   Type a task to start, or /help for commands.
 
 departai> Build a REST API with user authentication
 ```
+
+Each agent gets two rows:
+
+- **Global** — the shared default (`model` in the YAML); both agents see the same value here
+- **Local** — the per-agent override (`model_alpha` / `model_beta` in the YAML), or `(not set)` when the agent inherits the global
+
+An agent's effective model is its Local value if present, otherwise its Global value. If `instructions_file` is set in your config, it also appears in the banner.
 
 Type `/` to see a dropdown of available commands. Arrow keys (or Tab) navigate, Enter selects, and typing filters suggestions. The dropdown is hierarchical — type `/config ` and it suggests subcommands; type `/config set ` and it suggests config keys.
 
@@ -108,16 +120,27 @@ All commands use the `/` prefix. Autocomplete appears when you type `/` and filt
 |---------|-------------|
 | `/help` | Show all available commands |
 | `/config` | Show current configuration |
-| `/config set <key> <value>` | Set a config value for the current session (validates if the key is a model) |
-| `/config save` | Save current config to project `.departai/config.yml` |
-| `/config save global` | Save current config to `~/.departai/config.yml` |
+| `/config set <key> <value>` | Set a config value (validates models, then prompts to save) |
+| `/config save` | Save current config directly to project `.departai/config.yml` |
+| `/config save global` | Save current config directly to `~/.departai/config.yml` |
 | `/model` | Show global + per-agent models |
-| `/model <name>` | Set global model for both agents (validated) |
+| `/model <name>` | Set global model (validated, then prompts to save) |
+| `/model unset` | Clear global model — backend uses its default |
 | `/model alpha` | Show Agent Alpha's current model |
-| `/model alpha <name>` | Set Agent Alpha's model override (validated) |
+| `/model alpha <name>` | Set Agent Alpha's model override (validated, then prompts to save) |
+| `/model alpha unset` | Clear Agent Alpha's override — falls back to global |
 | `/model beta` | Show Agent Beta's current model |
-| `/model beta <name>` | Set Agent Beta's model override (validated) |
+| `/model beta <name>` | Set Agent Beta's model override (validated, then prompts to save) |
+| `/model beta unset` | Clear Agent Beta's override — falls back to global |
 | `/exit`, `/quit` | Exit departai |
+
+`unset` accepts the aliases `clear`, `reset`, and `none` — whichever feels natural. Same keywords work with `/config set` for the three model keys:
+
+```
+departai> /config set model.alpha unset
+  ✓ Agent Alpha override cleared (now uses global)
+  (save scope menu appears)
+```
 
 `exit` and `quit` also work without the `/` prefix. You can also press **Ctrl+C** or **Ctrl+D** to exit.
 
@@ -158,6 +181,23 @@ departai> /model alpha totally-fake-model
 ```
 
 Validation takes ~1–2 seconds and prevents typos from surfacing mid-task.
+
+### Persistence — save scope prompt
+
+After any successful `/model*` or `/config set*` change, departai shows a short arrow-key menu asking where to keep the change. **Project** is the default:
+
+```
+Save this change?
+  ▸ Project  (/path/to/project/.departai/config.yml)
+    Global   (/Users/you/.departai/config.yml)
+    Session only (don't save)
+```
+
+- **Project** writes to `<workdir>/.departai/config.yml` — only this project sees it
+- **Global** writes to `~/.departai/config.yml` — applies to every project by default
+- **Session only** keeps the change in memory until you `/exit`
+
+Pressing Ctrl+C on the menu is treated as "Session only" (safe). The explicit `/config save` and `/config save global` commands still work for saving current session state on demand.
 
 ### Config keys for `/config set`
 
@@ -224,10 +264,22 @@ departai> /config set model claude-opus-4-5
   ⠋ Validating claude-opus-4-5...
   ✓ model set to claude-opus-4-5
 
-departai> /config set model.alpha claude-opus-4-5
-  ⠋ Validating claude-opus-4-5...
-  ✓ model.alpha set to claude-opus-4-5
+  Save this change?
+    ▸ Project  (/path/to/project/.departai/config.yml)
+      Global   (/Users/you/.departai/config.yml)
+      Session only (don't save)
 
+  ✓ Config saved to /path/to/project/.departai/config.yml
+
+departai> /model alpha claude-opus-4-5
+  ⠋ Validating claude-opus-4-5...
+  ✓ Agent Alpha model set to claude-opus-4-5
+  (save scope menu appears again — pick Project / Global / Session only)
+```
+
+The explicit commands still work if you prefer to skip the menu:
+
+```
 departai> /config save
   ✓ Config saved to /path/to/project/.departai/config.yml
 

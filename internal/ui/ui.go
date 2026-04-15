@@ -11,6 +11,7 @@ import (
 
 	"github.com/briandowns/spinner"
 	"github.com/fatih/color"
+	"github.com/manifoldco/promptui"
 )
 
 // ── colour palette ──────────────────────────────────────────────────────────
@@ -119,21 +120,36 @@ func Error(msg string) {
 // ── interactive mode ────────────────────────────────────────────────────────
 
 // WelcomeBanner prints the startup banner for interactive mode with config summary.
-func WelcomeBanner(workDir, backend, model string, maxTurns int) {
+// Shows effective per-agent models (override if set, else global) and the
+// instructions file only if a custom one was provided.
+func WelcomeBanner(workDir, backend, model, modelAlpha, modelBeta, instructionsFile string, maxTurns int) {
 	fmt.Println()
 	boldCyan.Println("  DepartAI — AI Agent Orchestrator")
 	fmt.Println()
-	faint.Printf("  Work dir  : %s\n", workDir)
-	faint.Printf("  Backend   : %s\n", backend)
-	if model != "" {
-		faint.Printf("  Model     : %s\n", model)
-	} else {
-		faint.Printf("  Model     : %s\n", "(default)")
+	faint.Printf("  Work dir     : %s\n", workDir)
+	faint.Printf("  Backend      : %s\n", backend)
+	faint.Printf("  Max turns    : %d\n", maxTurns)
+	if instructionsFile != "" {
+		faint.Printf("  Instructions : %s\n", instructionsFile)
 	}
-	faint.Printf("  Max turns : %d\n", maxTurns)
+	fmt.Println()
+	faint.Println("  Models:")
+	faint.Printf("    Alpha Global : %s\n", modelDisplay(model))
+	faint.Printf("    Alpha Local  : %s\n", localOverride(modelAlpha))
+	faint.Printf("    Beta Global  : %s\n", modelDisplay(model))
+	faint.Printf("    Beta Local   : %s\n", localOverride(modelBeta))
 	fmt.Println()
 	faint.Println("  Type a task to start, or /help for commands.")
 	fmt.Println()
+}
+
+// localOverride renders an agent-specific override. Empty overrides fall back
+// to the shared global row, so we show "(not set)" explicitly.
+func localOverride(override string) string {
+	if override == "" {
+		return "(not set)"
+	}
+	return override
 }
 
 // InteractiveHelp prints the list of interactive commands.
@@ -142,17 +158,23 @@ func InteractiveHelp() {
 	bold.Println("  Commands:")
 	fmt.Println("    /help                        Show this help message")
 	fmt.Println("    /config                      Show current configuration")
-	fmt.Println("    /config set <key> <value>    Set a config value for this session")
-	fmt.Println("    /config save                 Save config to project .departai/config.yml")
-	fmt.Println("    /config save global          Save config to ~/.departai/config.yml")
+	fmt.Println("    /config set <key> <value>    Set a config value (prompts to save)")
+	fmt.Println("    /config save                 Save config directly to project .departai/config.yml")
+	fmt.Println("    /config save global          Save config directly to ~/.departai/config.yml")
 	fmt.Println("    /model                       Show all agent models")
-	fmt.Println("    /model <name>                Set global model for this session")
-	fmt.Println("    /model alpha [<name>]        Show/set Agent Alpha's model")
-	fmt.Println("    /model beta [<name>]         Show/set Agent Beta's model")
+	fmt.Println("    /model <name>                Set global model (prompts to save)")
+	fmt.Println("    /model unset                 Clear global model (falls back to backend default)")
+	fmt.Println("    /model alpha [<name>]        Show/set Agent Alpha's model (prompts to save)")
+	fmt.Println("    /model alpha unset           Clear Agent Alpha's override (inherits global)")
+	fmt.Println("    /model beta [<name>]         Show/set Agent Beta's model (prompts to save)")
+	fmt.Println("    /model beta unset            Clear Agent Beta's override (inherits global)")
 	fmt.Println("    /exit, /quit                 Exit departai")
 	fmt.Println()
 	bold.Println("  Config keys:")
 	fmt.Println("    model, model.alpha, model.beta, backend, max-turns, instructions")
+	fmt.Println()
+	bold.Println("  Save scope:")
+	fmt.Println("    After any change, pick Project (default), Global, or Session only.")
 	fmt.Println()
 	bold.Println("  Usage:")
 	fmt.Println("    Type any other text to start a task with that prompt.")
@@ -191,6 +213,12 @@ func ModelChanged(model string) {
 // ModelChangedFor prints a confirmation when a per-agent model is switched.
 func ModelChangedFor(agentName, model string) {
 	boldGreen.Printf("  ✓ %s model set to %s\n", agentName, model)
+}
+
+// ModelUnset prints a confirmation when a model value is cleared.
+// hint describes the fallback (e.g. "backend default" or "global").
+func ModelUnset(target, hint string) {
+	boldGreen.Printf("  ✓ %s cleared (now uses %s)\n", target, hint)
 }
 
 // modelDisplay returns the model name or "(default)" for empty values.
@@ -259,4 +287,58 @@ func TaskSeparator() {
 	fmt.Println()
 	faint.Println("  " + rule)
 	fmt.Println()
+}
+
+// ── save-scope picker ──────────────────────────────────────────────────────
+
+// SaveScope identifies where to persist a config change.
+type SaveScope int
+
+const (
+	// SaveScopeSession does not write to disk; the change lives only in memory.
+	SaveScopeSession SaveScope = iota
+	// SaveScopeProject writes to <workdir>/.departai/config.yml.
+	SaveScopeProject
+	// SaveScopeGlobal writes to ~/.departai/config.yml.
+	SaveScopeGlobal
+)
+
+// PromptSaveScope shows an arrow-key selector asking where to save a config
+// change. "Project" is the default. Returns SaveScopeSession on Ctrl+C,
+// selection error, or explicit "Session only" choice.
+func PromptSaveScope(projectPath, globalPath string) SaveScope {
+	items := []string{
+		fmt.Sprintf("Project  (%s)", projectPath),
+		fmt.Sprintf("Global   (%s)", globalPath),
+		"Session only (don't save)",
+	}
+
+	// Compact, single-line prompt and selection templates that match our style.
+	templates := &promptui.SelectTemplates{
+		Label:    "  {{ . }}",
+		Active:   "  ▸ {{ . | cyan }}",
+		Inactive: "    {{ . | faint }}",
+		Selected: "  ✓ {{ . | green }}",
+	}
+
+	prompt := promptui.Select{
+		Label:     "Save this change?",
+		Items:     items,
+		Size:      3,
+		HideHelp:  true,
+		Templates: templates,
+	}
+
+	idx, _, err := prompt.Run()
+	if err != nil {
+		return SaveScopeSession
+	}
+	switch idx {
+	case 0:
+		return SaveScopeProject
+	case 1:
+		return SaveScopeGlobal
+	default:
+		return SaveScopeSession
+	}
 }
