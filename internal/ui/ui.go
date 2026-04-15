@@ -115,3 +115,83 @@ func Warning(msg string) {
 func Error(msg string) {
 	boldRed.Printf("  ✗  %s\n", msg)
 }
+
+// ── interactive mode ────────────────────────────────────────────────────────
+
+// WelcomeBanner prints the startup banner for interactive mode with config summary.
+func WelcomeBanner(workDir, backend, model string, maxTurns int) {
+	fmt.Println()
+	boldCyan.Println("  DepartAI — AI Agent Orchestrator")
+	fmt.Println()
+	faint.Printf("  Work dir  : %s\n", workDir)
+	faint.Printf("  Backend   : %s\n", backend)
+	if model != "" {
+		faint.Printf("  Model     : %s\n", model)
+	} else {
+		faint.Printf("  Model     : %s\n", "(default)")
+	}
+	faint.Printf("  Max turns : %d\n", maxTurns)
+	fmt.Println()
+	faint.Println("  Type a task to start, or \"help\" for commands.")
+	fmt.Println()
+}
+
+// Prompt prints the interactive prompt (no trailing newline).
+func Prompt() {
+	boldCyan.Print("departai> ")
+}
+
+// InteractiveHelp prints the list of interactive commands.
+func InteractiveHelp() {
+	fmt.Println()
+	bold.Println("  Commands:")
+	fmt.Println("    help              Show this help message")
+	fmt.Println("    config            Show current configuration")
+	fmt.Println("    model             Show current model")
+	fmt.Println("    model <name>      Switch to a different model")
+	fmt.Println("    exit, quit        Exit departai")
+	fmt.Println()
+	bold.Println("  Usage:")
+	fmt.Println("    Type any other text to start a task with that prompt.")
+	fmt.Println("    Ctrl+D also exits.")
+	fmt.Println()
+}
+
+// ShowModel prints the current model setting.
+func ShowModel(model string) {
+	fmt.Println()
+	if model != "" {
+		bold.Printf("  Model: %s\n", model)
+	} else {
+		bold.Print("  Model: ")
+		faint.Println("(default)")
+	}
+	fmt.Println()
+}
+
+// ModelChanged prints a confirmation when the model is switched.
+func ModelChanged(model string) {
+	boldGreen.Printf("  ✓ Model set to %s\n", model)
+}
+
+// ShowConfig prints the current configuration.
+func ShowConfig(workDir, backend, model string, maxTurns int) {
+	fmt.Println()
+	bold.Println("  Current configuration:")
+	fmt.Printf("    Work dir  : %s\n", workDir)
+	fmt.Printf("    Backend   : %s\n", backend)
+	if model != "" {
+		fmt.Printf("    Model     : %s\n", model)
+	} else {
+		fmt.Printf("    Model     : %s\n", "(default)")
+	}
+	fmt.Printf("    Max turns : %d\n", maxTurns)
+	fmt.Println()
+}
+
+// TaskSeparator prints a visual break between tasks in interactive mode.
+func TaskSeparator() {
+	fmt.Println()
+	faint.Println("  " + rule)
+	fmt.Println()
+}

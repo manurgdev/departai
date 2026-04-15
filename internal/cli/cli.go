@@ -9,7 +9,6 @@ import (
 	"strings"
 
 	"github.com/manurgdev/departai/internal/config"
-	"github.com/manurgdev/departai/internal/orchestrator"
 	"github.com/manurgdev/departai/internal/ui"
 )
 
@@ -19,13 +18,14 @@ Runs two Claude Code CLI agents in sequential turns on a shared task.
 Agents hand off context via a task log until both agree the work is done.
 
 Usage:
-  departai [flags] <prompt>
+  departai [flags]            Start interactive mode
+  departai [flags] <prompt>   Run a single task and exit
 
 Examples:
+  departai                                             # interactive REPL
   departai "Build a REST API with user authentication"
-  departai --dir /path/to/project "Add unit tests for the auth module"
-  departai --instructions ./my-instructions.md "Refactor the database layer"
-  departai --model claude-opus-4-5 "Migrate the database schema"
+  departai --dir /path/to/project "Add unit tests"
+  departai --model claude-opus-4-5 "Migrate the schema"
 
 Configuration:
   departai reads .departai.yml from the project directory, then
@@ -58,13 +58,6 @@ func Run(args []string) error {
 		return err
 	}
 
-	if fs.NArg() == 0 {
-		fs.Usage()
-		return fmt.Errorf("a prompt is required")
-	}
-
-	prompt := strings.Join(fs.Args(), " ")
-
 	// Resolve working directory first — config search depends on it.
 	workDir := *dir
 	if workDir == "" {
@@ -96,17 +89,12 @@ func Run(args []string) error {
 		cfg.AgentBackend = *backendFlag
 	}
 
-	orch, err := orchestrator.New(orchestrator.Config{
-		WorkDir:          workDir,
-		Prompt:           prompt,
-		InstructionsFile: cfg.InstructionsFile,
-		MaxTurns:         cfg.MaxTurns,
-		AgentBackend:     cfg.AgentBackend,
-		Model:            cfg.Model,
-	})
-	if err != nil {
-		return fmt.Errorf("initialising orchestrator: %w", err)
+	// No prompt argument → interactive REPL mode.
+	if fs.NArg() == 0 {
+		return runInteractive(workDir, cfg)
 	}
 
-	return orch.Run()
+	// Prompt provided → single-task direct mode.
+	prompt := strings.Join(fs.Args(), " ")
+	return runTask(workDir, cfg, prompt)
 }
