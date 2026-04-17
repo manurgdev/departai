@@ -18,30 +18,76 @@ import (
 // defaultBaseInstructions is embedded when no --instructions file is provided.
 const defaultBaseInstructions = `# DepartAI Agent Protocol
 
-You are part of a two-agent relay team working collaboratively on a shared coding task.
-You and your partner agent take turns; context is handed off via a shared task log file.
+You are part of a two-agent relay team. You and a partner agent take turns on a shared
+coding task, handing off context through a task log file. You are NOT on the same side —
+your job is to produce the best possible result for the human, which means being
+**critical, rigorous, and pragmatic** about the work, including your partner's.
 
-## Turn Protocol
+## Your Role
 
-Each turn you must:
-1. Read the task log file to understand what has already been done.
-2. Continue the work — make real, concrete progress (write/edit code, run commands, etc.).
-3. At the end of your turn, **append** your turn summary to the task log file using the
-   exact format shown below.
+On every turn you must:
+
+1. **Review first.** If this is not the first turn, critically review what the previous
+   agent did. Do NOT blindly trust it. Read the actual code changes, run the code or
+   tests, and verify the work is correct. Look for:
+   - Bugs, logic errors, edge cases not handled
+   - Missing error handling or input validation
+   - Code that compiles but does not actually work as intended
+   - Incomplete implementations (stubs, TODOs, hardcoded values)
+   - Regressions — did the previous change break something that worked before?
+   - Poor code quality: duplication, unnecessary complexity, bad naming
+
+2. **Fix problems you find.** If the previous agent's work has issues, fix them. Do not
+   just note them — fix them. Be direct: "Agent Alpha left X broken, I fixed it by Y."
+
+3. **Continue the work.** After reviewing, make real progress on whatever remains.
+   Implement, test, iterate. Every turn should leave the codebase measurably closer to
+   done.
+
+4. **Write or run tests.** Whenever you implement functionality, verify it works:
+   - Run existing tests (` + "`go test`" + `, ` + "`npm test`" + `, ` + "`pytest`" + `, etc.) to catch regressions.
+   - Write new tests for the code you added if the project has a test framework.
+   - If the project has no tests, at minimum verify your changes manually (run the app,
+     try the endpoints, check the output).
+   - Report test results explicitly in your turn summary.
+
+5. **Log your turn.** Append a structured summary to the task log file (format below).
+
+## Critical Mindset
+
+- **Do not rubber-stamp.** If your partner says "Complete: yes" but the code has issues,
+  say "Complete: no" and explain what is wrong. Agreeing prematurely wastes the human's
+  time.
+- **Do not repeat work.** Read the log carefully. If something is already done and works,
+  move on. Focus on what is missing or broken.
+- **Be specific in criticism.** "The code looks fine" is useless. Instead: "The /login
+  endpoint returns 200 on invalid credentials because the password check on line 42 is
+  inverted."
+- **Be pragmatic.** Perfect is the enemy of done. Fix real problems, not style nits. If
+  the task asks for a REST API, ship a working REST API — don't get lost debating naming
+  conventions.
+- **Challenge scope creep.** If the previous agent started implementing things not asked
+  for in the original task, note it and stay focused on what the human requested.
 
 ## Turn Summary Format
 
-Append this block to the task log file (fill in the angle-bracket placeholders):
+At the end of your turn, **append** this block to the task log file:
 
     ## Turn <N> - <Your Agent Name>
 
-    **Working Directory**: <absolute path to the project directory you actually worked in>
+    **Working Directory**: <absolute path to the directory where you actually worked>
 
-    **What I did**: <concise summary of the actions you took this turn>
+    **Review of previous turn**: <what you checked, what was correct, what was wrong>
 
-    **Current State**: <description of the project state right now>
+    **What I did**: <concise list of actions taken this turn>
 
-    **Next Steps**: <what still needs to be done, or "None — task is complete">
+    **Tests**: <which tests you ran, pass/fail results, new tests written>
+
+    **Current State**: <honest assessment of where the project stands>
+
+    **Remaining Issues**: <known problems, edge cases, missing pieces — or "None">
+
+    **Next Steps**: <what the next agent should focus on — or "None — task is complete">
 
     **Complete**: <yes or no>
 
@@ -50,21 +96,24 @@ Append this block to the task log file (fill in the angle-bracket placeholders):
 Rules for **Working Directory**:
 - Always write the absolute path of the directory where you actually read and edited files.
 - If you were told to work in /path/A but the real project is at /path/B, write /path/B.
-- This field lets the orchestrator keep logs co-located with the project being edited.
 
 Rules for **Complete**:
-- Write ` + "`yes`" + ` only when the entire original task is fully implemented,
-  the code compiles/runs without errors, and all requirements are met.
-- Write ` + "`no`" + ` in all other cases.
+- Write ` + "`yes`" + ` ONLY when ALL of the following are true:
+  1. Every requirement from the original task is implemented.
+  2. The code compiles/runs without errors.
+  3. Tests pass (or manual verification confirms it works).
+  4. You reviewed the previous agent's work and found no outstanding issues.
+- Write ` + "`no`" + ` in all other cases. Being honest here saves everyone time.
 - The orchestrator stops only when **two consecutive turns** both say ` + "`yes`" + `.
 
 ## Working Guidelines
 
 - Work autonomously — no human will intervene between turns.
-- Prefer editing real files over creating throwaway scripts.
 - Read existing project files before modifying them.
-- Follow any project conventions found (CLAUDE.md, .cursorrules, etc.).
-- Make meaningful progress each turn; do not just plan.
+- Follow project conventions (CLAUDE.md, .cursorrules, etc.).
+- Make real progress each turn — implement, test, fix. Do not just plan.
+- Prefer small, correct changes over large, sweeping refactors.
+- When in doubt about the original intent, stay close to what the human asked for.
 `
 
 // Config holds all configuration for an Orchestrator run.
@@ -121,13 +170,24 @@ func New(cfg Config) (*Orchestrator, error) {
 
 // buildAgents constructs the two agent instances based on the configured backend.
 // Each agent uses its per-agent model override if set, else the global Model.
+// Agents are wired with an OnEvent handler for live streaming of tool calls.
 func buildAgents(cfg Config) ([]agent.Agent, error) {
+	eventHandler := func(evt claudeagent.StreamEvent) {
+		switch evt.Kind {
+		case "text":
+			ui.AgentText(evt.Text)
+		case "tool":
+			ui.AgentToolUse(evt.Tool, evt.Detail)
+		}
+	}
+
 	switch cfg.AgentBackend {
 	case "claude", "":
-		return []agent.Agent{
-			claudeagent.NewWithModel("Agent Alpha", modelOrDefault(cfg.ModelAlpha, cfg.Model)),
-			claudeagent.NewWithModel("Agent Beta", modelOrDefault(cfg.ModelBeta, cfg.Model)),
-		}, nil
+		alpha := claudeagent.NewWithModel("Agent Alpha", modelOrDefault(cfg.ModelAlpha, cfg.Model))
+		alpha.OnEvent = eventHandler
+		beta := claudeagent.NewWithModel("Agent Beta", modelOrDefault(cfg.ModelBeta, cfg.Model))
+		beta.OnEvent = eventHandler
+		return []agent.Agent{alpha, beta}, nil
 	default:
 		return nil, fmt.Errorf("unknown agent backend %q (supported: claude)", cfg.AgentBackend)
 	}
@@ -141,6 +201,17 @@ func modelOrDefault(override, fallback string) string {
 	return fallback
 }
 
+// agentModel returns the effective model for the named agent.
+func (o *Orchestrator) agentModel(name string) string {
+	switch name {
+	case "Agent Alpha":
+		return modelOrDefault(o.cfg.ModelAlpha, o.cfg.Model)
+	case "Agent Beta":
+		return modelOrDefault(o.cfg.ModelBeta, o.cfg.Model)
+	}
+	return o.cfg.Model
+}
+
 // Run executes the relay loop. It returns nil on successful completion (consensus
 // or max-turns reached) and an error only on infrastructure failures.
 func (o *Orchestrator) Run() error {
@@ -151,7 +222,7 @@ func (o *Orchestrator) Run() error {
 	for turn := 1; turn <= o.cfg.MaxTurns; turn++ {
 		ag := o.agents[(turn-1)%len(o.agents)]
 
-		ui.TurnHeader(turn, o.cfg.MaxTurns, ag.Name())
+		ui.TurnHeader(turn, o.cfg.MaxTurns, ag.Name(), o.agentModel(ag.Name()))
 
 		prompt, err := o.buildPrompt(turn, ag.Name())
 		if err != nil {
@@ -159,18 +230,14 @@ func (o *Orchestrator) Run() error {
 		}
 
 		start := time.Now()
-		var result agent.TurnResult
 
-		runErr := ui.RunWithSpinner(ag.Name()+" working…", func() error {
-			var e error
-			result, e = ag.RunTurn(ctx, o.cfg.WorkDir, prompt)
-			return e
-		})
+		// Agent runs with live streaming — tool calls are displayed by OnEvent.
+		result, runErr := ag.RunTurn(ctx, o.cfg.WorkDir, prompt)
 
 		elapsed := time.Since(start)
 
 		// Always persist raw logs — even on error, for diagnostics.
-		if logErr := o.taskLog.WriteRawLog(turn, ag.Name(), prompt, result.Output, result.Stderr); logErr != nil {
+		if logErr := o.taskLog.WriteRawLog(turn, ag.Name(), result.Activity, result.Output, result.Stderr); logErr != nil {
 			ui.Warning(fmt.Sprintf("could not write raw log: %v", logErr))
 		}
 

@@ -41,11 +41,14 @@ func Header(taskID, taskDir, workDir string) {
 }
 
 // TurnHeader prints a styled divider before each agent turn.
-func TurnHeader(turn, maxTurns int, agentName string) {
+// model is the effective model for this agent (may be empty for backend default).
+func TurnHeader(turn, maxTurns int, agentName, model string) {
 	faint.Println("  " + rule)
 	bold.Printf("  Turn %d/%d", turn, maxTurns)
 	fmt.Print("  •  ")
-	boldCyan.Println(agentName)
+	boldCyan.Print(agentName)
+	fmt.Print("  •  ")
+	faint.Println(modelDisplay(model))
 	faint.Println("  " + rule)
 	fmt.Println()
 }
@@ -104,6 +107,26 @@ func MaxTurnsReached(maxTurns int, taskLogPath, workDir string) {
 	fmt.Println()
 	faint.Printf("  Task log : %s\n", taskLogPath)
 	faint.Printf("  Review   : %s\n", workDir)
+	fmt.Println()
+}
+
+// AgentText prints the agent's reasoning/narrative text during a streaming turn.
+// This is the human-readable explanation of what the agent is doing and why.
+func AgentText(text string) {
+	for _, line := range strings.Split(text, "\n") {
+		if trimmed := strings.TrimSpace(line); trimmed != "" {
+			faint.Printf("  %s\n", trimmed)
+		}
+	}
+}
+
+// AgentToolUse prints a single tool-call event during a streaming agent turn.
+func AgentToolUse(toolName, detail string) {
+	boldCyan.Print("  → ")
+	bold.Print(toolName)
+	if detail != "" {
+		faint.Printf(" %s", detail)
+	}
 	fmt.Println()
 }
 

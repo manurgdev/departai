@@ -75,9 +75,9 @@ func (tl *TaskLog) Read() (string, error) {
 	return string(data), nil
 }
 
-// WriteRawLog saves the full prompt, stdout, and stderr for a turn to a dedicated
-// file named turn-N-<agent>-raw.log in the task directory.
-func (tl *TaskLog) WriteRawLog(turnNumber int, agentName, prompt, stdout, stderr string) error {
+// WriteRawLog saves the activity (tool calls), output, and stderr for a turn
+// to a dedicated file named turn-N-<agent>-raw.log in the task directory.
+func (tl *TaskLog) WriteRawLog(turnNumber int, agentName string, activity []string, output, stderr string) error {
 	filename := fmt.Sprintf("turn-%d-%s-raw.log", turnNumber, sanitizeName(agentName))
 	path := filepath.Join(tl.Dir, filename)
 
@@ -89,15 +89,21 @@ func (tl *TaskLog) WriteRawLog(turnNumber int, agentName, prompt, stdout, stderr
 	fmt.Fprintf(&b, "Time    : %s\n", time.Now().Format("2006-01-02 15:04:05"))
 	fmt.Fprintf(&b, "\n")
 
-	fmt.Fprintf(&b, "--- PROMPT ---\n\n")
-	b.WriteString(prompt)
-	fmt.Fprintf(&b, "\n\n")
+	fmt.Fprintf(&b, "--- ACTIVITY ---\n\n")
+	if len(activity) == 0 {
+		b.WriteString("  (no tool calls)\n")
+	} else {
+		for _, entry := range activity {
+			fmt.Fprintf(&b, "  → %s\n", entry)
+		}
+	}
+	fmt.Fprintf(&b, "\n")
 
-	fmt.Fprintf(&b, "--- STDOUT ---\n\n")
-	if stdout == "" {
+	fmt.Fprintf(&b, "--- OUTPUT ---\n\n")
+	if output == "" {
 		b.WriteString("(empty)\n")
 	} else {
-		b.WriteString(stdout)
+		b.WriteString(output)
 	}
 	fmt.Fprintf(&b, "\n\n")
 

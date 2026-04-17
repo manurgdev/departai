@@ -5,8 +5,9 @@ import "context"
 
 // TurnResult holds the output from a single agent turn.
 type TurnResult struct {
-	Output string // Raw stdout captured from the agent process
-	Stderr string // Raw stderr captured from the agent process
+	Output   string   // Final result text from the agent
+	Stderr   string   // Raw stderr captured from the agent process
+	Activity []string // Tool calls made during the turn (human-readable, for logging)
 }
 
 // Agent is the interface that all AI coding agent backends must implement.
