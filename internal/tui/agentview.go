@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"time"
@@ -25,11 +26,12 @@ const AutoContinueDelay = 5 * time.Second
 // so the turn activity persists in scroll-back history.
 func RunAgentView(
 	eventCh <-chan claude.StreamEvent,
+	cancelAgent context.CancelFunc,
 	agentName, model string,
 	turn, maxTurns int,
 	taskStart time.Time,
-) string {
-	m := newModel(eventCh, agentName, model, turn, maxTurns, taskStart)
+) (result string, stopped bool) {
+	m := newModel(eventCh, cancelAgent, agentName, model, turn, maxTurns, taskStart)
 	p := tea.NewProgram(m, tea.WithAltScreen())
 	final, _ := p.Run()
 	fm := final.(Model)
@@ -37,7 +39,7 @@ func RunAgentView(
 	// Print persistent summary to normal terminal after alt-screen closes.
 	printFinalSummary(fm)
 
-	return fm.result
+	return fm.result, fm.stopped
 }
 
 // ── model ───────────────────────────────────────────────────────────────────
@@ -71,10 +73,12 @@ type Model struct {
 	model     string
 	turn      int
 	maxTurns  int
-	result    string
-	startTime time.Time // when this turn started
-	elapsed   time.Duration
-	taskStart time.Time // when the entire task started (across all turns)
+	result      string
+	startTime   time.Time // when this turn started
+	elapsed     time.Duration
+	taskStart   time.Time // when the entire task started (across all turns)
+	cancelAgent context.CancelFunc
+	stopped     bool // true if user pressed ESC to stop
 
 	countdownLeft time.Duration
 	spinnerFrame  int
@@ -85,20 +89,22 @@ var spinnerChars = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "�
 
 func newModel(
 	ch <-chan claude.StreamEvent,
+	cancel context.CancelFunc,
 	agentName, model string,
 	turn, maxTurns int,
 	taskStart time.Time,
 ) Model {
 	return Model{
-		eventCh:   ch,
-		agentName: agentName,
-		model:     model,
-		turn:      turn,
-		maxTurns:  maxTurns,
-		phase:     phaseStreaming,
-		cursor:    0,
-		startTime: time.Now(),
-		taskStart: taskStart,
+		eventCh:     ch,
+		cancelAgent: cancel,
+		agentName:   agentName,
+		model:       model,
+		turn:        turn,
+		maxTurns:    maxTurns,
+		phase:       phaseStreaming,
+		cursor:      0,
+		startTime:   time.Now(),
+		taskStart:   taskStart,
 	}
 }
 
@@ -159,8 +165,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, waitForEvent(m.eventCh)
 
 	case channelClosedMsg:
-		m.phase = phaseCountdown
 		m.elapsed = time.Since(m.startTime)
+		if m.stopped {
+			// User pressed ESC — exit immediately, no countdown.
+			m.rebuildContent()
+			return m, tea.Quit
+		}
+		m.phase = phaseCountdown
 		m.countdownLeft = AutoContinueDelay
 		if len(m.toolIdx) > 0 {
 			m.cursor = 0
@@ -189,6 +200,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		switch m.phase {
 		case phaseStreaming:
+			if msg.String() == "esc" {
+				m.stopped = true
+				if m.cancelAgent != nil {
+					m.cancelAgent() // kill agent → eventCh will close
+				}
+				return m, nil // wait for channelClosedMsg
+			}
 			return m, nil
 
 		case phaseCountdown:
@@ -330,8 +348,13 @@ func (m Model) renderHeader() string {
 	}
 	elapsed := m.elapsed.Round(time.Second).String()
 
-	title := fmt.Sprintf("  Turn %d/%d  •  %s  •  %s",
-		m.turn, m.maxTurns, m.agentName, modelStr)
+	var turnLabel string
+	if m.maxTurns > 0 {
+		turnLabel = fmt.Sprintf("Turn %d/%d", m.turn, m.maxTurns)
+	} else {
+		turnLabel = fmt.Sprintf("Turn %d", m.turn)
+	}
+	title := fmt.Sprintf("  %s  •  %s  •  %s", turnLabel, m.agentName, modelStr)
 
 	if m.phase == phaseStreaming {
 		title += styleFaint.Render(fmt.Sprintf("  (%s)", elapsed))
@@ -378,8 +401,14 @@ func printFinalSummary(m Model) {
 	elapsed := m.elapsed.Round(time.Second)
 
 	fmt.Println(styleRule.Render("  " + rule))
+	var turnLabel string
+	if m.maxTurns > 0 {
+		turnLabel = fmt.Sprintf("Turn %d/%d", m.turn, m.maxTurns)
+	} else {
+		turnLabel = fmt.Sprintf("Turn %d", m.turn)
+	}
 	fmt.Println(styleBold.Render(fmt.Sprintf(
-		"  Turn %d/%d  •  %s  •  %s", m.turn, m.maxTurns, m.agentName, modelStr)) +
+		"  %s  •  %s  •  %s", turnLabel, m.agentName, modelStr)) +
 		styleGreen.Render(fmt.Sprintf("  (%s)", elapsed)))
 	fmt.Println(styleRule.Render("  " + rule))
 

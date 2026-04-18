@@ -3,6 +3,7 @@ package orchestrator
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -15,6 +16,10 @@ import (
 	"github.com/manurgdev/departai/internal/tui"
 	"github.com/manurgdev/departai/internal/ui"
 )
+
+// ErrUserStopped is returned when the user presses ESC to stop a running task.
+// The REPL uses this to track the task for /continue.
+var ErrUserStopped = errors.New("task stopped by user")
 
 // defaultBaseInstructions is embedded when no --instructions file is provided.
 const defaultBaseInstructions = `# DepartAI Agent Protocol
@@ -168,11 +173,8 @@ type Orchestrator struct {
 	taskLog   *tasklog.TaskLog
 }
 
-// New creates and initialises a new Orchestrator, including the task directory.
+// New creates and initialises a new Orchestrator with a fresh task directory.
 func New(cfg Config) (*Orchestrator, error) {
-	if cfg.MaxTurns <= 0 {
-		cfg.MaxTurns = 10
-	}
 	if cfg.AgentBackend == "" {
 		cfg.AgentBackend = "claude"
 	}
@@ -198,6 +200,45 @@ func New(cfg Config) (*Orchestrator, error) {
 		baseInstr: baseInstr,
 		taskLog:   tl,
 	}, nil
+}
+
+// NewFromExisting creates an Orchestrator that resumes an existing task
+// from the given task directory. The orchestrator reads the existing task log
+// and continues from where it left off.
+func NewFromExisting(cfg Config, taskDir string) (*Orchestrator, error) {
+	if cfg.AgentBackend == "" {
+		cfg.AgentBackend = "claude"
+	}
+
+	baseInstr, err := loadInstructions(cfg.InstructionsFile)
+	if err != nil {
+		return nil, fmt.Errorf("loading instructions: %w", err)
+	}
+
+	tl, err := tasklog.Load(taskDir)
+	if err != nil {
+		return nil, fmt.Errorf("loading existing task: %w", err)
+	}
+
+	// Use the prompt from the existing task log.
+	cfg.Prompt = tl.Prompt
+
+	agents, err := buildAgents(cfg)
+	if err != nil {
+		return nil, err
+	}
+
+	return &Orchestrator{
+		cfg:       cfg,
+		agents:    agents,
+		baseInstr: baseInstr,
+		taskLog:   tl,
+	}, nil
+}
+
+// TaskDir returns the absolute path to the task directory.
+func (o *Orchestrator) TaskDir() string {
+	return o.taskLog.Dir
 }
 
 // buildAgents constructs the two agent instances based on the configured backend.
@@ -235,14 +276,20 @@ func (o *Orchestrator) agentModel(name string) string {
 }
 
 // Run executes the relay loop. It returns nil on successful completion (consensus
-// or max-turns reached) and an error only on infrastructure failures.
+// or max-turns reached), ErrUserStopped if the user pressed ESC, or an error on
+// infrastructure failures.
 func (o *Orchestrator) Run() error {
 	ui.Header(o.taskLog.TaskID, o.taskLog.Dir, o.cfg.WorkDir)
 
-	ctx := context.Background()
 	taskStart := time.Now()
 
-	for turn := 1; turn <= o.cfg.MaxTurns; turn++ {
+	// Task log turn numbers continue incrementing across runs (Turn 5, 6, 7...),
+	// but MaxTurns counts turns-in-this-run (resets on each /continue or new directive).
+	existingTurns, _ := o.taskLog.ParseTurns()
+	nextLogTurn := len(existingTurns) + 1
+
+	for runTurn := 1; o.cfg.MaxTurns == 0 || runTurn <= o.cfg.MaxTurns; runTurn++ {
+		turn := nextLogTurn + runTurn - 1
 		ag := o.agents[(turn-1)%len(o.agents)]
 
 		prompt, err := o.buildPrompt(turn, ag.Name())
@@ -250,11 +297,15 @@ func (o *Orchestrator) Run() error {
 			return fmt.Errorf("building prompt for turn %d: %w", turn, err)
 		}
 
-		result, runErr := o.runTurnWithTUI(ctx, ag, prompt, turn, taskStart)
+		result, stopped, runErr := o.runTurnWithTUI(ag, prompt, turn, taskStart)
 
-		// Always persist raw logs — even on error, for diagnostics.
+		// Always persist raw logs — even on error/stop, for diagnostics.
 		if logErr := o.taskLog.WriteRawLog(turn, ag.Name(), result.Activity, result.Output, result.Stderr); logErr != nil {
 			ui.Warning(fmt.Sprintf("could not write raw log: %v", logErr))
+		}
+
+		if stopped {
+			return ErrUserStopped
 		}
 
 		if runErr != nil {
@@ -279,7 +330,10 @@ func (o *Orchestrator) Run() error {
 		}
 	}
 
-	ui.MaxTurnsReached(o.cfg.MaxTurns, o.taskLog.Path(), o.cfg.WorkDir)
+	// Only reachable when MaxTurns > 0 and the loop exhausted.
+	if o.cfg.MaxTurns > 0 {
+		ui.MaxTurnsReached(o.cfg.MaxTurns, o.taskLog.Path(), o.cfg.WorkDir)
+	}
 	return nil
 }
 
@@ -311,15 +365,21 @@ func (o *Orchestrator) maybeRelocateTaskDir() error {
 }
 
 // runTurnWithTUI runs an agent turn with a bubbletea TUI for live output.
-// The agent runs in a goroutine, pushing events to a channel that feeds the TUI.
-// The TUI blocks until the agent finishes AND the user presses q to continue.
-func (o *Orchestrator) runTurnWithTUI(ctx context.Context, ag agent.Agent, prompt string, turn int, taskStart time.Time) (agent.TurnResult, error) {
-	// Set up event channel — the agent pushes events, the TUI consumes them.
+// Returns the result, whether the user stopped (ESC), and any error.
+func (o *Orchestrator) runTurnWithTUI(ag agent.Agent, prompt string, turn int, taskStart time.Time) (agent.TurnResult, bool, error) {
+	// Cancellable context — ESC in the TUI calls cancel() to kill the agent.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Event channel — agent pushes events, TUI consumes them.
 	eventCh := make(chan claudeagent.StreamEvent, 100)
 
 	if ca, ok := ag.(*claudeagent.Agent); ok {
 		ca.OnEvent = func(evt claudeagent.StreamEvent) {
 			eventCh <- evt
+		}
+		ca.OnStreamDone = func() {
+			close(eventCh) // TUI gets channelClosedMsg immediately
 		}
 	}
 
@@ -332,16 +392,21 @@ func (o *Orchestrator) runTurnWithTUI(ctx context.Context, ag agent.Agent, promp
 
 	go func() {
 		r, e := ag.RunTurn(ctx, o.cfg.WorkDir, prompt)
-		close(eventCh) // signal no more events → TUI switches to review mode
+		// eventCh already closed by OnStreamDone (before cmd.Wait)
 		outcomeCh <- turnOutcome{r, e}
 	}()
 
-	// Launch bubbletea TUI — blocks until agent is done and user presses q.
-	tui.RunAgentView(eventCh, ag.Name(), o.agentModel(ag.Name()), turn, o.cfg.MaxTurns, taskStart)
+	// Launch bubbletea TUI — blocks until agent finishes (+ auto-continue or review)
+	// or user presses ESC (which calls cancel, killing the agent).
+	_, stopped := tui.RunAgentView(eventCh, cancel, ag.Name(), o.agentModel(ag.Name()), turn, o.cfg.MaxTurns, taskStart)
 
 	// Collect agent result.
 	outcome := <-outcomeCh
-	return outcome.result, outcome.err
+
+	if stopped {
+		return outcome.result, true, nil
+	}
+	return outcome.result, false, outcome.err
 }
 
 // buildPrompt constructs the full prompt string for a given agent turn.

@@ -49,7 +49,7 @@ func Run(args []string) error {
 	// CLI flags — zero values mean "not set by user; use config file value".
 	dir := fs.String("dir", "", "Working directory for agents (default: current directory)")
 	instructionsFlag := fs.String("instructions", "", "Path to a custom base instructions markdown file")
-	maxTurnsFlag := fs.Int("max-turns", 0, "Maximum number of agent turns (default: 10, or from config)")
+	maxTurnsFlag := fs.Int("max-turns", 0, "Maximum number of agent turns (default: unlimited)")
 	modelFlag := fs.String("model", "", "Model to use (e.g. claude-opus-4-5); overrides config")
 	backendFlag := fs.String("backend", "", "Agent backend to use (default: claude)")
 
@@ -103,5 +103,6 @@ func Run(args []string) error {
 
 	// Prompt provided → single-task direct mode.
 	prompt := strings.Join(fs.Args(), " ")
-	return runTask(workDir, cfg, prompt)
+	_, err = runTask(workDir, cfg, prompt)
+	return err
 }

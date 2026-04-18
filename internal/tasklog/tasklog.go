@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 )
@@ -41,6 +42,105 @@ func New(baseDir, prompt string) (*TaskLog, error) {
 	}
 
 	return tl, nil
+}
+
+// Load opens an existing task directory and returns its TaskLog.
+// It reads the task-log.md to extract the original prompt.
+func Load(taskDir string) (*TaskLog, error) {
+	taskID := filepath.Base(taskDir)
+	logPath := filepath.Join(taskDir, logFileName)
+
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		return nil, fmt.Errorf("reading task log %s: %w", logPath, err)
+	}
+
+	prompt := extractPrompt(string(data))
+
+	return &TaskLog{
+		TaskID: taskID,
+		Dir:    taskDir,
+		Prompt: prompt,
+	}, nil
+}
+
+// promptRe extracts text between "## Original Task" and the next "---".
+var promptRe = regexp.MustCompile(`(?s)## Original Task\s*\n(.*?)\n---`)
+
+func extractPrompt(content string) string {
+	m := promptRe.FindStringSubmatch(content)
+	if len(m) < 2 {
+		return "(unknown)"
+	}
+	return strings.TrimSpace(m[1])
+}
+
+// ── task listing ────────────────────────────────────────────────────────────
+
+// TaskSummary is a brief overview of a task for display in /resume.
+type TaskSummary struct {
+	TaskID    string
+	Dir       string
+	Prompt    string
+	TurnCount int
+}
+
+// ListTasks scans <workDir>/.departai/tasks/ and returns summaries of all
+// existing tasks, sorted by most recent first.
+func ListTasks(workDir string) ([]TaskSummary, error) {
+	tasksDir := filepath.Join(workDir, ".departai", "tasks")
+	entries, err := os.ReadDir(tasksDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("listing tasks: %w", err)
+	}
+
+	var summaries []TaskSummary
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		dir := filepath.Join(tasksDir, e.Name())
+		logPath := filepath.Join(dir, logFileName)
+		data, err := os.ReadFile(logPath)
+		if err != nil {
+			continue // skip dirs without a valid task log
+		}
+		content := string(data)
+		prompt := extractPrompt(content)
+		turns := parseTurns(content)
+
+		summaries = append(summaries, TaskSummary{
+			TaskID:    e.Name(),
+			Dir:       dir,
+			Prompt:    prompt,
+			TurnCount: len(turns),
+		})
+	}
+
+	// Sort newest first (task IDs start with YYYYMMDD-HHMMSS).
+	sort.Slice(summaries, func(i, j int) bool {
+		return summaries[i].TaskID > summaries[j].TaskID
+	})
+
+	return summaries, nil
+}
+
+// AppendUserDirective appends a new user instruction to the task log.
+// Agents read this as part of the task log and act on it in subsequent turns.
+func (tl *TaskLog) AppendUserDirective(text string) error {
+	directive := fmt.Sprintf("\n## User Directive\n\n%s\n\n---\n\n", text)
+
+	f, err := os.OpenFile(tl.Path(), os.O_APPEND|os.O_WRONLY, 0644)
+	if err != nil {
+		return fmt.Errorf("opening task log for append: %w", err)
+	}
+	defer f.Close()
+
+	_, err = f.WriteString(directive)
+	return err
 }
 
 // Path returns the absolute path to the task log markdown file.

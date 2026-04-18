@@ -6,6 +6,7 @@ package ui
 
 import (
 	"fmt"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -130,6 +131,34 @@ func AgentToolUse(toolName, detail string) {
 	fmt.Println()
 }
 
+// TaskStopped prints a message when the user presses ESC to stop a task.
+func TaskStopped() {
+	fmt.Println()
+	boldYellow.Println("  Task paused. Use /continue to resume or /resume to pick another task.")
+	fmt.Println()
+}
+
+// NoActiveTask prints an error when /continue is used with no active task.
+func NoActiveTask() {
+	boldRed.Println("  No active task. Use /resume to pick a previous task, or type a new prompt.")
+}
+
+// TaskSelected confirms a task was selected via /resume (without running it).
+func TaskSelected(taskDir string) {
+	taskID := filepath.Base(taskDir)
+	fmt.Println()
+	boldGreen.Printf("  Task selected: %s\n", taskID)
+	faint.Println("  Type a prompt to add instructions, or /continue to resume the relay.")
+	fmt.Println()
+}
+
+// TaskCleared confirms the current task was deselected via /new.
+func TaskCleared() {
+	fmt.Println()
+	faint.Println("  Task cleared. Next prompt will create a new task.")
+	fmt.Println()
+}
+
 // Warning prints a non-fatal warning line.
 func Warning(msg string) {
 	boldYellow.Printf("  ⚠  %s\n", msg)
@@ -151,7 +180,7 @@ func WelcomeBanner(workDir, backend, model, modelAlpha, modelBeta, instructionsF
 	fmt.Println()
 	faint.Printf("  Work dir     : %s\n", workDir)
 	faint.Printf("  Backend      : %s\n", backend)
-	faint.Printf("  Max turns    : %d\n", maxTurns)
+	faint.Printf("  Max turns    : %s\n", maxTurnsDisplay(maxTurns))
 	if instructionsFile != "" {
 		faint.Printf("  Instructions : %s\n", instructionsFile)
 	}
@@ -191,10 +220,16 @@ func InteractiveHelp() {
 	fmt.Println("    /model alpha unset           Clear Agent Alpha's override (inherits global)")
 	fmt.Println("    /model beta [<name>]         Show/set Agent Beta's model (prompts to save)")
 	fmt.Println("    /model beta unset            Clear Agent Beta's override (inherits global)")
+	fmt.Println("    /continue                    Continue the active task's relay loop")
+	fmt.Println("    /resume                      Select a previous task (does not run it)")
+	fmt.Println("    /new                         Deselect current task (next prompt = new task)")
 	fmt.Println("    /exit, /quit                 Exit departai")
 	fmt.Println()
 	bold.Println("  Config keys:")
 	fmt.Println("    model, model.alpha, model.beta, backend, max-turns, instructions")
+	fmt.Println()
+	bold.Println("  Task control:")
+	fmt.Println("    Press ESC during a running task to pause it.")
 	fmt.Println()
 	bold.Println("  Save scope:")
 	fmt.Println("    After any change, pick Project (default), Global, or Session only.")
@@ -245,6 +280,13 @@ func ModelUnset(target, hint string) {
 }
 
 // modelDisplay returns the model name or "(default)" for empty values.
+func maxTurnsDisplay(n int) string {
+	if n <= 0 {
+		return "unlimited"
+	}
+	return fmt.Sprintf("%d", n)
+}
+
 func modelDisplay(model string) string {
 	if model == "" {
 		return "(default)"
@@ -301,7 +343,7 @@ func ShowConfig(workDir, backend, model, modelAlpha, modelBeta string, maxTurns 
 	if modelBeta != "" {
 		fmt.Printf("    Model Beta   : %s\n", modelBeta)
 	}
-	fmt.Printf("    Max turns    : %d\n", maxTurns)
+	fmt.Printf("    Max turns    : %s\n", maxTurnsDisplay(maxTurns))
 	fmt.Println()
 }
 

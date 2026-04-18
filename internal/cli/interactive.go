@@ -2,17 +2,21 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 
 	goprompt "github.com/c-bata/go-prompt"
+	"github.com/manifoldco/promptui"
 	"golang.org/x/term"
 
 	claudeagent "github.com/manurgdev/departai/internal/agent/claude"
 	"github.com/manurgdev/departai/internal/config"
 	"github.com/manurgdev/departai/internal/orchestrator"
+	"github.com/manurgdev/departai/internal/tasklog"
 	"github.com/manurgdev/departai/internal/ui"
 )
 
@@ -31,6 +35,30 @@ func runInteractive(workDir string, cfg config.Config) error {
 	// Mutable config pointer — the executor closure modifies it via /config set.
 	cfgPtr := &cfg
 
+	// Current task tracking. When set, prompts are appended as directives to
+	// this task instead of creating a new one.
+	var currentTaskDir string
+
+	// Helper: run or resume a task and handle stop/completion.
+	executeTask := func(taskDir string, isResume bool) {
+		var td string
+		var err error
+		if isResume {
+			td, err = resumeTask(workDir, *cfgPtr, taskDir)
+		} else {
+			td, err = runTask(workDir, *cfgPtr, taskDir) // taskDir is actually the prompt here
+		}
+		if errors.Is(err, orchestrator.ErrUserStopped) {
+			currentTaskDir = td
+			ui.TaskStopped()
+		} else if err != nil {
+			ui.Error(fmt.Sprintf("task failed: %v", err))
+		}
+		// On consensus: keep currentTaskDir — the task is done but still "selected"
+		// so the user can add more directives if needed.
+		ui.TaskSeparator()
+	}
+
 	// Executor is called by go-prompt on every Enter press.
 	executor := func(line string) {
 		line = strings.TrimSpace(line)
@@ -45,6 +73,25 @@ func runInteractive(workDir string, cfg config.Config) error {
 		case line == "/help":
 			ui.InteractiveHelp()
 
+		case line == "/continue":
+			if currentTaskDir == "" {
+				ui.NoActiveTask()
+				return
+			}
+			executeTask(currentTaskDir, true)
+
+		case line == "/resume":
+			selected := handleResumeCommand(workDir)
+			if selected == "" {
+				return
+			}
+			currentTaskDir = selected
+			ui.TaskSelected(currentTaskDir)
+
+		case line == "/new":
+			currentTaskDir = ""
+			ui.TaskCleared()
+
 		case line == "/config" || strings.HasPrefix(line, "/config "):
 			handleConfigCommand(strings.TrimPrefix(line, "/config"), workDir, cfgPtr)
 
@@ -58,17 +105,48 @@ func runInteractive(workDir string, cfg config.Config) error {
 			ui.ConfigSetError(fmt.Sprintf("unknown command: %s (type /help for commands)", line))
 
 		default:
-			if err := runTask(workDir, *cfgPtr, line); err != nil {
-				ui.Error(fmt.Sprintf("task failed: %v", err))
+			// User typed a prompt (not a command).
+			if currentTaskDir != "" {
+				// Active task exists — append as a new directive and continue.
+				tl, err := tasklog.Load(currentTaskDir)
+				if err != nil {
+					ui.Error(fmt.Sprintf("loading task: %v", err))
+					return
+				}
+				if err := tl.AppendUserDirective(line); err != nil {
+					ui.Error(fmt.Sprintf("appending directive: %v", err))
+					return
+				}
+				executeTask(currentTaskDir, true)
+			} else {
+				// No active task — create a new one.
+				taskDir, err := runTask(workDir, *cfgPtr, line)
+				if errors.Is(err, orchestrator.ErrUserStopped) {
+					currentTaskDir = taskDir
+					ui.TaskStopped()
+				} else if err != nil {
+					ui.Error(fmt.Sprintf("task failed: %v", err))
+				} else {
+					currentTaskDir = taskDir // keep as active task
+				}
+				ui.TaskSeparator()
 			}
-			ui.TaskSeparator()
 		}
 	}
 
 	p := goprompt.New(
 		executor,
 		completer,
-		goprompt.OptionPrefix("departai> "),
+		goprompt.OptionLivePrefix(func() (string, bool) {
+			if currentTaskDir != "" {
+				short := filepath.Base(currentTaskDir)
+				if len(short) > 25 {
+					short = short[:22] + "..."
+				}
+				return fmt.Sprintf("departai [%s]> ", short), true
+			}
+			return "departai> ", true
+		}),
 		goprompt.OptionPrefixTextColor(goprompt.Cyan),
 		goprompt.OptionPreviewSuggestionTextColor(goprompt.DarkGray),
 		goprompt.OptionSuggestionBGColor(goprompt.DarkGray),
@@ -117,6 +195,9 @@ var topLevelCommands = []goprompt.Suggest{
 	{Text: "/model alpha", Description: "Show/set Agent Alpha's model"},
 	{Text: "/model beta", Description: "Show/set Agent Beta's model"},
 	{Text: "/model unset", Description: "Clear the global model (falls back to backend default)"},
+	{Text: "/continue", Description: "Continue the active task's relay loop"},
+	{Text: "/resume", Description: "Select a previous task (does not run it)"},
+	{Text: "/new", Description: "Deselect current task — next prompt creates a new one"},
 	{Text: "/exit", Description: "Exit departai"},
 	{Text: "/quit", Description: "Exit departai"},
 }
@@ -300,8 +381,8 @@ func handleConfigSet(kv string, workDir string, cfg *config.Config) {
 
 	case "max-turns":
 		n, err := strconv.Atoi(value)
-		if err != nil || n <= 0 {
-			ui.ConfigSetError("max-turns must be a positive integer")
+		if err != nil || n < 0 {
+			ui.ConfigSetError("max-turns must be 0 (unlimited) or a positive integer")
 			return
 		}
 		cfg.MaxTurns = n
@@ -447,7 +528,8 @@ func setModelValidated(target, newValue string, onSuccess func()) {
 }
 
 // runTask creates an orchestrator for a single task prompt and runs it.
-func runTask(workDir string, cfg config.Config, prompt string) error {
+// Returns the task directory (for tracking) and any error.
+func runTask(workDir string, cfg config.Config, prompt string) (string, error) {
 	orch, err := orchestrator.New(orchestrator.Config{
 		WorkDir:          workDir,
 		Prompt:           prompt,
@@ -459,8 +541,68 @@ func runTask(workDir string, cfg config.Config, prompt string) error {
 		ModelBeta:        cfg.ModelBeta,
 	})
 	if err != nil {
-		return fmt.Errorf("initialising orchestrator: %w", err)
+		return "", fmt.Errorf("initialising orchestrator: %w", err)
 	}
 
-	return orch.Run()
+	return orch.TaskDir(), orch.Run()
+}
+
+// resumeTask resumes an existing task from its task directory.
+func resumeTask(workDir string, cfg config.Config, taskDir string) (string, error) {
+	orch, err := orchestrator.NewFromExisting(orchestrator.Config{
+		WorkDir:          workDir,
+		InstructionsFile: cfg.InstructionsFile,
+		MaxTurns:         cfg.MaxTurns,
+		AgentBackend:     cfg.AgentBackend,
+		Model:            cfg.Model,
+		ModelAlpha:       cfg.ModelAlpha,
+		ModelBeta:        cfg.ModelBeta,
+	}, taskDir)
+	if err != nil {
+		return taskDir, fmt.Errorf("resuming task: %w", err)
+	}
+
+	return orch.TaskDir(), orch.Run()
+}
+
+// handleResumeCommand shows a promptui.Select with existing tasks and returns
+// the selected task directory, or "" if cancelled.
+func handleResumeCommand(workDir string) string {
+	tasks, err := tasklog.ListTasks(workDir)
+	if err != nil {
+		ui.Error(fmt.Sprintf("listing tasks: %v", err))
+		return ""
+	}
+	if len(tasks) == 0 {
+		ui.Warning("No previous tasks found in this directory.")
+		return ""
+	}
+
+	items := make([]string, len(tasks))
+	for i, t := range tasks {
+		prompt := t.Prompt
+		if len(prompt) > 60 {
+			prompt = prompt[:57] + "..."
+		}
+		items[i] = fmt.Sprintf("%s  (%d turns)  %s", t.TaskID, t.TurnCount, prompt)
+	}
+
+	sel := promptui.Select{
+		Label: "Select a task to resume",
+		Items: items,
+		Size:  10,
+		Templates: &promptui.SelectTemplates{
+			Label:    "  {{ . }}",
+			Active:   "  ▸ {{ . | cyan }}",
+			Inactive: "    {{ . | faint }}",
+			Selected: "  ✓ {{ . | green }}",
+		},
+	}
+
+	idx, _, err := sel.Run()
+	if err != nil {
+		return "" // cancelled
+	}
+
+	return tasks[idx].Dir
 }

@@ -43,7 +43,7 @@ func (c Config) ModelFor(agentName string) string {
 func Defaults() Config {
 	return Config{
 		AgentBackend: "claude",
-		MaxTurns:     10,
+		MaxTurns:     0, // 0 = unlimited turns (run until consensus)
 	}
 }
 

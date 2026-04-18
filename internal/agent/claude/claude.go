@@ -22,6 +22,12 @@ type Agent struct {
 	// agent reasoning text). Set by the orchestrator for live feedback.
 	// Nil means silent (no live display).
 	OnEvent func(evt StreamEvent)
+
+	// OnStreamDone is called when the stdout scanner finishes (all events
+	// have been delivered). This fires BEFORE cmd.Wait() — use it to close
+	// event channels so the TUI can transition immediately without waiting
+	// for the process to fully exit.
+	OnStreamDone func()
 }
 
 // New creates a Claude Code CLI agent with the given display name.
@@ -99,6 +105,12 @@ func (a *Agent) RunTurn(ctx context.Context, workDir string, prompt string) (age
 				a.OnEvent(evt)
 			}
 		}
+	}
+
+	// Signal that all events have been delivered — the TUI can transition
+	// to review/countdown immediately without waiting for cmd.Wait().
+	if a.OnStreamDone != nil {
+		a.OnStreamDone()
 	}
 
 	waitErr := cmd.Wait()
