@@ -1,35 +1,36 @@
 # departai
 
-An AI agent orchestrator CLI that runs two Claude Code agents in sequential turns on a shared coding task. Each agent can use its own model (e.g. Alpha on opus, Beta on sonnet). Agents hand off context through a shared task log until both agree the work is complete, then hands control back to you for review.
+AI agent orchestrator CLI that runs two Claude Code agents in sequential relay turns on a shared coding task. Each agent can use its own model. Agents hand off context through a shared task log, critically review each other's work, and only stop when both independently agree the task is complete.
 
 ## How It Works
 
 ```
-User → departai
-         │
-         ▼
-   Interactive REPL with autocomplete
-         │
-         ├─► User types a task
-         │
-         ├─► Agent Alpha: reads log, works, appends turn summary (Complete: no)
-         │
-         ├─► Agent Beta:  reads log, continues work, appends turn summary (Complete: no)
-         │
-         ├─► Agent Alpha: reads log, finishes work (Complete: yes)
-         │
-         ├─► Agent Beta:  verifies, confirms (Complete: yes)
-         │
-         ├─► Both agreed → user reviews changes
-         │
-         └─► User types next task or /exit
+departai
+  │
+  ├─► Interactive REPL with autocomplete
+  │
+  ├─► User types a task prompt
+  │     └─► Agents start working in relay turns:
+  │
+  │         Turn 1 (Alpha):  Implements navigation + CTA changes → Complete: no
+  │         Turn 2 (Beta):   Reviews Alpha, finds missing OG image fix, implements it → Complete: no
+  │         Turn 3 (Alpha):  Reviews Beta's fix, runs tests, finds nothing wrong → Complete: yes
+  │         Turn 4 (Beta):   Reviews everything, confirms all requirements met → Complete: yes
+  │         └─► Consensus → task ends
+  │
+  ├─► User types another prompt (same task context)
+  │     └─► Appended as directive, agents continue from where they left off
+  │
+  └─► /new to start fresh, /resume to pick a previous task
 ```
 
-**Why sequential turns?** Each agent gets a fresh context window. The task log is the handoff mechanism — each agent reads what was done and continues from there. This lets agents collaborate on tasks that would otherwise exhaust a single context window.
+**Why sequential turns?** Each agent gets a fresh context window. The task log is the handoff mechanism — each agent reads what was done and continues from there. This avoids context window exhaustion on large tasks.
+
+**Why two agents?** They critically review each other's work. An agent can only say "Complete: yes" if it made zero code changes during its turn — meaning it reviewed the other's work and found nothing wrong. This forces a real verification cycle.
 
 ## Installation
 
-### Using go install (recommended)
+### Using go install
 
 ```bash
 go install github.com/manurgdev/departai@latest
@@ -59,20 +60,19 @@ claude --version
 
 ### Interactive mode (default)
 
-Run `departai` with no arguments to start the interactive REPL:
-
 ```bash
-departai
+departai                         # uses current directory
+departai --dir /path/to/project  # explicit project directory
 ```
 
-You'll see a prompt where you can type tasks directly or use slash commands with autocomplete:
+The REPL shows a banner with current config and a prompt. Type `/` to see autocomplete suggestions for all commands:
 
 ```
   DepartAI — AI Agent Orchestrator
 
   Work dir     : /Users/you/projects/my-app
   Backend      : claude
-  Max turns    : 10
+  Max turns    : unlimited
 
   Models:
     Alpha Global : claude-opus-4-5
@@ -85,266 +85,201 @@ You'll see a prompt where you can type tasks directly or use slash commands with
 departai> Build a REST API with user authentication
 ```
 
-Each agent gets two rows:
-
-- **Global** — the shared default (`model` in the YAML); both agents see the same value here
-- **Local** — the per-agent override (`model_alpha` / `model_beta` in the YAML), or `(not set)` when the agent inherits the global
-
-An agent's effective model is its Local value if present, otherwise its Global value. If `instructions_file` is set in your config, it also appears in the banner.
-
-Type `/` to see a dropdown of available commands. Arrow keys (or Tab) navigate, Enter selects, and typing filters suggestions. The dropdown is hierarchical — type `/config ` and it suggests subcommands; type `/config set ` and it suggests config keys.
-
 ### Direct mode
 
-Pass a prompt as an argument to run a single task and exit:
+Run a single task without the REPL:
 
 ```bash
-# Works in the current directory
 departai "Build a REST API with user authentication"
-
-# Specify a target project directory
-departai --dir /path/to/project "Add unit tests for the payment module"
-
-# Use a specific model
-departai --model claude-opus-4-5 "Migrate the database schema to Postgres"
-
-# Limit the number of turns
+departai --dir /path/to/project "Add unit tests"
+departai --model opus "Migrate the database schema"
 departai --max-turns 6 "Fix the failing CI pipeline"
 ```
 
+## Task Lifecycle
+
+departai tracks an **active task**. The REPL prompt shows it:
+
+```
+departai>                                ← no active task
+departai> Build an API                   ← creates new task, agents start working
+departai [20260418-build-an-api]>        ← task is active, agents finished or paused
+departai [20260418-build-an-api]> add auth middleware  ← adds directive to SAME task
+departai [20260418-build-an-api]> /continue            ← resumes relay without new directive
+departai [20260418-build-an-api]> /new                 ← deselects → back to "departai>"
+departai> /resume                        ← pick any previous task
+```
+
+### Key concepts
+
+- **New prompt with active task** — appended as a "User Directive" to the task log. Agents read it and act on it. Turn counter resets for `max-turns` but task log turn numbers keep incrementing.
+- **New prompt without active task** — creates a new task from scratch.
+- **`/continue`** — resumes the active task's agent relay loop (no new directive).
+- **`/resume`** — shows a list of all previous tasks in the project, select one to make it active (does not run it — use `/continue` or type a prompt after).
+- **`/new`** — deselects the active task. Next prompt creates a fresh one.
+- **ESC** — press during a running turn to stop the agent immediately. The task stays active for `/continue` later.
+
+## Streaming TUI
+
+While agents work, departai shows a **bubbletea TUI** (alt-screen) with:
+
+- **Pinned header** — turn number, agent name, model, elapsed time (always visible)
+- **Live event stream** — agent reasoning text + tool calls as they happen
+- **Spinner + total elapsed** in the footer
+- **Auto-continue** — when a turn finishes, a 5-second countdown starts. Press any key to enter review mode, or wait to auto-continue to the next turn.
+
+In **review mode** (after a turn finishes, press any key during countdown):
+
+- `↑/↓` or `j/k` — navigate between tool calls
+- `Enter` or `Space` — expand/collapse a tool call (shows diff for Edit operations)
+- `q` or `Esc` — continue to next turn
+
+After the TUI exits, a compact summary is printed to the terminal so the turn activity persists in scroll-back history.
+
 ## Interactive Commands
 
-All commands use the `/` prefix. Autocomplete appears when you type `/` and filters as you continue typing.
+All commands use the `/` prefix with hierarchical autocomplete.
 
 | Command | Description |
 |---------|-------------|
 | `/help` | Show all available commands |
 | `/config` | Show current configuration |
-| `/config set <key> <value>` | Set a config value (validates models, then prompts to save) |
-| `/config save` | Save current config directly to project `.departai/config.yml` |
-| `/config save global` | Save current config directly to `~/.departai/config.yml` |
+| `/config set <key> <value>` | Set a config value (validates models, prompts to save) |
+| `/config save` | Save config to project `.departai/config.yml` |
+| `/config save global` | Save config to `~/.departai/config.yml` |
 | `/model` | Show global + per-agent models |
-| `/model <name>` | Set global model (validated, then prompts to save) |
-| `/model unset` | Clear global model — backend uses its default |
-| `/model alpha` | Show Agent Alpha's current model |
-| `/model alpha <name>` | Set Agent Alpha's model override (validated, then prompts to save) |
-| `/model alpha unset` | Clear Agent Alpha's override — falls back to global |
-| `/model beta` | Show Agent Beta's current model |
-| `/model beta <name>` | Set Agent Beta's model override (validated, then prompts to save) |
-| `/model beta unset` | Clear Agent Beta's override — falls back to global |
+| `/model <name>` | Set global model (validated) |
+| `/model alpha [<name>]` | Show/set Agent Alpha's model (validated) |
+| `/model beta [<name>]` | Show/set Agent Beta's model (validated) |
+| `/model <agent> unset` | Clear an agent's override (inherits global) |
+| `/continue` | Continue the active task's relay loop |
+| `/resume` | Select a previous task from a list |
+| `/new` | Deselect active task (next prompt = new task) |
 | `/exit`, `/quit` | Exit departai |
 
-`unset` accepts the aliases `clear`, `reset`, and `none` — whichever feels natural. Same keywords work with `/config set` for the three model keys:
-
-```
-departai> /config set model.alpha unset
-  ✓ Agent Alpha override cleared (now uses global)
-  (save scope menu appears)
-```
-
-`exit` and `quit` also work without the `/` prefix. You can also press **Ctrl+C** or **Ctrl+D** to exit.
-
-### Per-agent models
-
-departai runs two sequential agents (Alpha and Beta) and you can give each a different model — for example, use a powerful model for the implementer and a cheaper one for the verifier:
-
-```
-departai> /model alpha claude-opus-4-5
-  ⠋ Validating claude-opus-4-5...
-  ✓ Agent Alpha model set to claude-opus-4-5
-
-departai> /model beta claude-sonnet-4-5
-  ⠋ Validating claude-sonnet-4-5...
-  ✓ Agent Beta model set to claude-sonnet-4-5
-
-departai> /model
-
-  Models:
-    Global       : (default)
-    Agent Alpha  : claude-opus-4-5
-    Agent Beta   : claude-sonnet-4-5
-```
-
-Resolution order per agent: the agent's override (`model_alpha` / `model_beta`) wins if set, otherwise the global `model` is used, otherwise the backend default.
-
-### Model validation
-
-Every time you set a model (via `/model`, `/model alpha|beta`, `/config set model*`, or the `--model` CLI flag), departai asks the backend whether it accepts that model name. If not, the session keeps the previous value:
-
-```
-departai> /model alpha totally-fake-model
-  ⠋ Validating totally-fake-model...
-
-  ✗ Model "totally-fake-model" rejected for Agent Alpha
-    There's an issue with the selected model (totally-fake-model). It may not exist or you may not have access to it.
-  Agent Alpha is unchanged.
-```
-
-Validation takes ~1–2 seconds and prevents typos from surfacing mid-task.
-
-### Persistence — save scope prompt
-
-After any successful `/model*` or `/config set*` change, departai shows a short arrow-key menu asking where to keep the change. **Project** is the default:
-
-```
-Save this change?
-  ▸ Project  (/path/to/project/.departai/config.yml)
-    Global   (/Users/you/.departai/config.yml)
-    Session only (don't save)
-```
-
-- **Project** writes to `<workdir>/.departai/config.yml` — only this project sees it
-- **Global** writes to `~/.departai/config.yml` — applies to every project by default
-- **Session only** keeps the change in memory until you `/exit`
-
-Pressing Ctrl+C on the menu is treated as "Session only" (safe). The explicit `/config save` and `/config save global` commands still work for saving current session state on demand.
+`exit` and `quit` also work without `/`. Press **Ctrl+C** or **Ctrl+D** to exit.
 
 ### Config keys for `/config set`
 
 | Key | Example | Description |
 |-----|---------|-------------|
-| `model` | `/config set model claude-opus-4-5` | Global model (both agents, validated) |
-| `model.alpha` | `/config set model.alpha claude-opus-4-5` | Override for Agent Alpha (validated) |
-| `model.beta` | `/config set model.beta claude-sonnet-4-5` | Override for Agent Beta (validated) |
+| `model` | `/config set model opus` | Global model for both agents (validated) |
+| `model.alpha` | `/config set model.alpha opus` | Override for Agent Alpha (validated) |
+| `model.beta` | `/config set model.beta sonnet` | Override for Agent Beta (validated) |
 | `backend` | `/config set backend claude` | Agent backend |
-| `max-turns` | `/config set max-turns 6` | Max agent turns |
-| `instructions` | `/config set instructions ./my-rules.md` | Custom instructions file |
+| `max-turns` | `/config set max-turns 20` | Max turns per run (0 = unlimited) |
+| `instructions` | `/config set instructions ./rules.md` | Custom instructions file |
+
+### Model validation
+
+Every model change is validated against the backend before being accepted (~1-2s). Invalid names are rejected and the previous value is kept.
+
+### Persistence
+
+After any config change, a menu asks where to save: **Project** (default), **Global**, or **Session only**. Ctrl+C on the menu = Session only.
 
 ## CLI Flags
-
-Flags work in both interactive and direct mode. In interactive mode, flags set the initial session config.
 
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--dir` | current directory | Working directory where agents operate |
-| `--model` | (backend default) | Global model to use (e.g. `claude-opus-4-5`). Validated on startup. |
+| `--model` | (backend default) | Global model (validated on startup) |
 | `--backend` | `claude` | Agent backend CLI to use |
-| `--instructions` | built-in | Path to a custom agent protocol markdown file |
-| `--max-turns` | `10` | Safety cap on the number of turns |
-
-If `--model` is rejected by the backend, departai exits immediately with the error — no task runs. Per-agent model overrides are only exposed through the REPL and config file, not the CLI flags.
+| `--instructions` | built-in | Path to custom agent protocol markdown file |
+| `--max-turns` | unlimited (0) | Max turns per run; 0 = no limit |
 
 ## Configuration
 
-departai uses YAML config files loaded in layers (later layers override earlier ones):
+YAML config files loaded in layers (later wins):
 
 1. Built-in defaults
-2. `~/.departai/config.yml` — user-global settings
-3. `<project>/.departai/config.yml` — project-level settings
+2. `~/.departai/config.yml` — user-global
+3. `<project>/.departai/config.yml` — project-level
 4. CLI flags
-5. Interactive `/config set` commands (session only, unless saved)
-
-### Config file format
+5. Interactive `/config set` commands
 
 ```yaml
 # .departai/config.yml
-
-# Which CLI backend to use. Currently only "claude" is supported.
 agent_backend: claude
-
-# Maximum number of agent turns before stopping (safety cap).
-max_turns: 10
-
-# Global default model. Used by any agent that does not have its own override.
-# If omitted, the backend uses its own default.
-model: claude-opus-4-5
-
-# Per-agent overrides (optional). Each overrides the global `model` for that agent.
-model_alpha: claude-opus-4-5
+max_turns: 0                    # 0 = unlimited
+model: claude-opus-4-5          # global default
+model_alpha: claude-opus-4-5    # per-agent overrides (optional)
 model_beta: claude-sonnet-4-5
-
-# Path to a custom base instructions markdown file (optional).
 # instructions_file: ./my-instructions.md
 ```
 
-### Managing config from the REPL
+## Agent Protocol
 
-```
-departai> /config set model claude-opus-4-5
-  ⠋ Validating claude-opus-4-5...
-  ✓ model set to claude-opus-4-5
+Agents follow a built-in protocol (overridable with `--instructions`):
 
-  Save this change?
-    ▸ Project  (/path/to/project/.departai/config.yml)
-      Global   (/Users/you/.departai/config.yml)
-      Session only (don't save)
+- **Review first** — each agent critically reviews the previous agent's work before doing anything else. Look for bugs, missing edge cases, regressions.
+- **Fix, don't note** — if something is wrong, fix it. Don't just write "there's a bug".
+- **Run tests** — execute existing tests, write new ones if the project has a test framework.
+- **Incremental work** — focus on one aspect per turn for large tasks. Leave clear handoff notes.
+- **Complete: yes requires zero changes** — an agent can only mark "Complete: yes" if it reviewed the other agent's work, found no issues, and made no code changes itself. This forces a real verification cycle.
 
-  ✓ Config saved to /path/to/project/.departai/config.yml
+### Turn summary format
 
-departai> /model alpha claude-opus-4-5
-  ⠋ Validating claude-opus-4-5...
-  ✓ Agent Alpha model set to claude-opus-4-5
-  (save scope menu appears again — pick Project / Global / Session only)
-```
-
-The explicit commands still work if you prefer to skip the menu:
-
-```
-departai> /config save
-  ✓ Config saved to /path/to/project/.departai/config.yml
-
-departai> /config save global
-  ✓ Config saved to /Users/you/.departai/config.yml
-```
-
-## Shared Context System
-
-### Task Directory
-
-Each run creates a task directory at `.departai/tasks/<task-id>/` inside the working directory:
-
-```
-<workdir>/
-└── .departai/
-    ├── config.yml                   ← project-level config (optional)
-    └── tasks/
-        └── 20240110-143022-build-rest-api/
-            ├── task-log.md              ← structured handoff log
-            ├── turn-1-agent-alpha-raw.log   ← full prompt + stdout/stderr
-            └── turn-2-agent-beta-raw.log
-```
-
-Add `.departai/` to your `.gitignore` or commit the logs — your choice.
-
-### Task Log Format
-
-Agents append structured turn summaries to `task-log.md`:
+Each turn, agents append a structured block to the task log:
 
 ```markdown
-## Turn 1 - Agent Alpha
+## Turn 3 - Agent Alpha
 
 **Working Directory**: /path/to/project
 
-**What I did**: Scaffolded the Go project, created models for User and Session,
-set up the Gin router with /register and /login endpoints.
+**Review of previous turn**: Checked Beta's OG image fix — badge text is correct,
+image regenerated successfully, grep confirms no stray registration references.
 
-**Current State**: Endpoints exist but JWT signing is not implemented yet.
+**What I did**: Reviewed all modified files. No changes needed.
 
-**Next Steps**: Implement JWT generation on login and middleware for protected routes.
+**Tests**: Ran `pnpm build` — completed successfully.
 
-**Complete**: no
+**Current State**: Registration fully disabled across all surfaces.
+
+**Remaining Issues**: None
+
+**Next Steps**: None — task is complete.
+
+**Complete**: yes
 
 ---
 ```
 
-Consensus is reached when the last two consecutive turns both report `**Complete**: yes`.
+### Completion consensus
 
-### Raw Turn Logs
+The orchestrator stops when the last **two consecutive turns** both report `Complete: yes`. Since an agent can only say "yes" without making changes, this guarantees a review cycle: implement → review/fix → verify → confirm.
 
-Every turn generates a raw log file containing:
-- The full prompt sent to the agent (base instructions + project rules + task log + turn directive)
-- The agent's complete stdout output
-- The agent's stderr output (if any)
+## Shared Context System
 
-These are invaluable for debugging agent behavior.
+### Task directory
 
-### Working Directory Auto-Detection
+```
+<workdir>/
+└── .departai/
+    ├── config.yml                           ← project-level config
+    └── tasks/
+        └── 20260418-build-rest-api/
+            ├── task-log.md                  ← structured handoff log
+            ├── turn-1-agent-alpha-raw.log   ← activity + output (no internal prompts)
+            └── turn-2-agent-beta-raw.log
+```
 
-If an agent discovers the actual project is in a different directory than `--dir`, it reports the real path in the `**Working Directory**` field. The orchestrator detects this after each turn, moves the task directory to the correct project, and continues subsequent turns from there.
+### Raw turn logs
 
-### Project Rules
+Each turn generates a log file with:
+- **Activity** — tool calls the agent made (Read, Edit, Bash, etc.)
+- **Output** — the agent's final result text
+- **Stderr** — error output (if any)
 
-At the start of each turn the orchestrator automatically reads and injects any project convention files it finds in the working directory:
+Internal prompting (base instructions, protocol) is NOT included — raw logs show only task-relevant information.
+
+### Working directory auto-detection
+
+If an agent discovers the project is in a different directory than `--dir`, it reports the real path in its `Working Directory` field. The orchestrator detects the mismatch, moves the task directory to the correct project, and continues from there.
+
+### Project rules
+
+The orchestrator automatically reads and injects any project convention files it finds:
 
 - `CLAUDE.md`
 - `AGENTS.md`
@@ -356,25 +291,44 @@ At the start of each turn the orchestrator automatically reads and injects any p
 ```
 departai/
 ├── main.go
+├── .gitignore
+├── go.mod / go.sum
 └── internal/
     ├── cli/
     │   ├── cli.go              # flag parsing, config loading, mode selection
-    │   └── interactive.go      # REPL loop, go-prompt autocomplete, slash commands
+    │   └── interactive.go      # REPL, go-prompt autocomplete, slash commands, task state
     ├── config/
-    │   └── config.go           # YAML config: load, save, layered merge
+    │   └── config.go           # YAML config: load, save, layered merge, per-agent models
+    ├── tui/
+    │   ├── agentview.go        # bubbletea model: streaming + review + auto-continue
+    │   └── style.go            # lipgloss styles
     ├── ui/
     │   └── ui.go               # styled terminal output, spinners, colors
     ├── agent/
     │   ├── agent.go            # Agent interface + TurnResult type
     │   └── claude/
-    │       └── claude.go       # Claude Code CLI implementation
+    │       ├── claude.go       # Claude Code CLI implementation + model validation
+    │       └── stream.go       # stream-json parser for live tool call display
     ├── orchestrator/
-    │   └── orchestrator.go     # turn loop, prompt builder, consensus check
+    │   └── orchestrator.go     # turn loop, prompt builder, consensus, resume, ESC-to-stop
     └── tasklog/
-        └── tasklog.go          # task directory, log read/write/parse, relocate
+        └── tasklog.go          # task directory, log read/write/parse, load, list, directives
 ```
 
-### Adding a New Agent Backend
+### Key dependencies
+
+| Package | Purpose |
+|---------|---------|
+| `c-bata/go-prompt` | Interactive REPL with autocomplete |
+| `charmbracelet/bubbletea` | TUI for streaming agent output |
+| `charmbracelet/bubbles` | Viewport component for scrollable content |
+| `charmbracelet/lipgloss` | TUI styling |
+| `fatih/color` | ANSI colors for non-TUI output |
+| `briandowns/spinner` | Spinner for model validation |
+| `manifoldco/promptui` | Arrow-key menus (save scope, task resume) |
+| `gopkg.in/yaml.v3` | Config file parsing |
+
+### Adding a new agent backend
 
 Implement the `agent.Agent` interface:
 
@@ -385,8 +339,4 @@ type Agent interface {
 }
 ```
 
-Then add a case to `buildAgents()` in `orchestrator.go`. For example, a future Codex CLI backend would live at `internal/agent/codex/codex.go` and be selected with `--backend codex` or `agent_backend: codex` in the config file.
-
-## Completion Consensus
-
-The orchestrator checks the task log after each turn. It stops and notifies you when the last two consecutive turns both report `**Complete**: yes`. If `--max-turns` is reached first, it stops and shows the current state for review.
+Then add a case to `buildAgents()` in `orchestrator.go` and select it with `--backend <name>` or `agent_backend: <name>` in config.
