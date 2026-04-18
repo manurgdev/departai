@@ -33,11 +33,13 @@ type contentBlock struct {
 // StreamEvent is a simplified representation of something worth showing
 // to the user or logging.
 type StreamEvent struct {
-	Kind   string // "tool", "text", "result"
-	Tool   string // tool name (only when Kind == "tool")
-	Detail string // human-readable detail (file path, command, pattern, …)
-	Text   string // agent reasoning / narrative (only when Kind == "text")
-	Result string // final output text (only when Kind == "result")
+	Kind    string // "tool", "text", "result"
+	Tool    string // tool name (only when Kind == "tool")
+	Detail  string // human-readable detail (file path, command, pattern, …)
+	Text    string // agent reasoning / narrative (only when Kind == "text")
+	Result  string // final output text (only when Kind == "result")
+	DiffOld string // old_string from Edit input (for collapsible diff view)
+	DiffNew string // new_string from Edit input
 }
 
 // ParseStreamLine extracts all displayable events from one line of
@@ -69,11 +71,16 @@ func ParseStreamLine(line []byte) []StreamEvent {
 				}
 			case "tool_use":
 				if block.Name != "" {
-					events = append(events, StreamEvent{
+					evt := StreamEvent{
 						Kind:   "tool",
 						Tool:   block.Name,
 						Detail: extractToolDetail(block.Name, block.Input),
-					})
+					}
+					if block.Name == "Edit" {
+						evt.DiffOld = jsonStringField(block.Input, "old_string")
+						evt.DiffNew = jsonStringField(block.Input, "new_string")
+					}
+					events = append(events, evt)
 				}
 			}
 		}

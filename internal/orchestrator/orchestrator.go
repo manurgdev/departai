@@ -7,11 +7,11 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"time"
 
 	"github.com/manurgdev/departai/internal/agent"
 	claudeagent "github.com/manurgdev/departai/internal/agent/claude"
 	"github.com/manurgdev/departai/internal/tasklog"
+	"github.com/manurgdev/departai/internal/tui"
 	"github.com/manurgdev/departai/internal/ui"
 )
 
@@ -69,6 +69,21 @@ On every turn you must:
 - **Challenge scope creep.** If the previous agent started implementing things not asked
   for in the original task, note it and stay focused on what the human requested.
 
+## Incremental Work
+
+You do NOT need to finish the entire task in a single turn. In fact, trying to do
+everything at once often leads to mistakes. Instead:
+
+- **Focus on one aspect per turn.** For example: "this turn I'll handle the navigation
+  component" — then leave clear Next Steps for the other agent to handle the footer, CTA,
+  etc.
+- **For large tasks, work in phases:** plan → core implementation → edge cases → tests →
+  cleanup. Each turn covers one phase.
+- **Leave clear handoff notes.** Your "Next Steps" field is what the other agent reads
+  first. Be specific: "Footer still has a registration link on line 22 that needs updating."
+- **Small tasks can be quick.** If the task is genuinely simple (one file, one change),
+  doing it in one turn is fine — but the other agent still needs to verify.
+
 ## Turn Summary Format
 
 At the end of your turn, **append** this block to the task log file:
@@ -99,12 +114,20 @@ Rules for **Working Directory**:
 
 Rules for **Complete**:
 - Write ` + "`yes`" + ` ONLY when ALL of the following are true:
-  1. Every requirement from the original task is implemented.
-  2. The code compiles/runs without errors.
-  3. Tests pass (or manual verification confirms it works).
-  4. You reviewed the previous agent's work and found no outstanding issues.
+  1. You made **ZERO code changes** during this turn (no edits, no new files, no deletions).
+  2. You reviewed the previous agent's work and found no outstanding issues.
+  3. Every requirement from the original task is implemented.
+  4. The code compiles/runs without errors.
+  5. Tests pass (or manual verification confirms it works).
+- **If you edited ANY file during your turn, you MUST write ` + "`no`" + `**, even if you
+  believe the task is now finished. The other agent needs to verify your changes.
 - Write ` + "`no`" + ` in all other cases. Being honest here saves everyone time.
 - The orchestrator stops only when **two consecutive turns** both say ` + "`yes`" + `.
+
+Why this rule matters: if you fix something your partner missed and then say "Complete: yes",
+nobody verifies YOUR fix. By saying "no", you force a verification cycle. The task only
+ends when both agents agree that nothing more needs to change — not when one agent
+heroically does everything and declares victory.
 
 ## Working Guidelines
 
@@ -114,6 +137,14 @@ Rules for **Complete**:
 - Make real progress each turn — implement, test, fix. Do not just plan.
 - Prefer small, correct changes over large, sweeping refactors.
 - When in doubt about the original intent, stay close to what the human asked for.
+
+## Example turn flow for a medium task
+
+Turn 1 (Alpha): Implements navigation and CTA changes → Complete: no
+Turn 2 (Beta):  Reviews Alpha's work, implements footer + OG image changes → Complete: no
+Turn 3 (Alpha): Reviews Beta's work, runs full test suite, finds nothing wrong → Complete: yes
+Turn 4 (Beta):  Reviews everything, confirms all requirements met → Complete: yes
+→ Consensus reached, task ends.
 `
 
 // Config holds all configuration for an Orchestrator run.
@@ -170,23 +201,13 @@ func New(cfg Config) (*Orchestrator, error) {
 
 // buildAgents constructs the two agent instances based on the configured backend.
 // Each agent uses its per-agent model override if set, else the global Model.
-// Agents are wired with an OnEvent handler for live streaming of tool calls.
+// OnEvent is NOT set here — the orchestrator's Run loop sets it per-turn to
+// feed events into the bubbletea TUI via a channel.
 func buildAgents(cfg Config) ([]agent.Agent, error) {
-	eventHandler := func(evt claudeagent.StreamEvent) {
-		switch evt.Kind {
-		case "text":
-			ui.AgentText(evt.Text)
-		case "tool":
-			ui.AgentToolUse(evt.Tool, evt.Detail)
-		}
-	}
-
 	switch cfg.AgentBackend {
 	case "claude", "":
 		alpha := claudeagent.NewWithModel("Agent Alpha", modelOrDefault(cfg.ModelAlpha, cfg.Model))
-		alpha.OnEvent = eventHandler
 		beta := claudeagent.NewWithModel("Agent Beta", modelOrDefault(cfg.ModelBeta, cfg.Model))
-		beta.OnEvent = eventHandler
 		return []agent.Agent{alpha, beta}, nil
 	default:
 		return nil, fmt.Errorf("unknown agent backend %q (supported: claude)", cfg.AgentBackend)
@@ -222,19 +243,12 @@ func (o *Orchestrator) Run() error {
 	for turn := 1; turn <= o.cfg.MaxTurns; turn++ {
 		ag := o.agents[(turn-1)%len(o.agents)]
 
-		ui.TurnHeader(turn, o.cfg.MaxTurns, ag.Name(), o.agentModel(ag.Name()))
-
 		prompt, err := o.buildPrompt(turn, ag.Name())
 		if err != nil {
 			return fmt.Errorf("building prompt for turn %d: %w", turn, err)
 		}
 
-		start := time.Now()
-
-		// Agent runs with live streaming — tool calls are displayed by OnEvent.
-		result, runErr := ag.RunTurn(ctx, o.cfg.WorkDir, prompt)
-
-		elapsed := time.Since(start)
+		result, runErr := o.runTurnWithTUI(ctx, ag, prompt, turn)
 
 		// Always persist raw logs — even on error, for diagnostics.
 		if logErr := o.taskLog.WriteRawLog(turn, ag.Name(), result.Activity, result.Output, result.Stderr); logErr != nil {
@@ -244,8 +258,6 @@ func (o *Orchestrator) Run() error {
 		if runErr != nil {
 			return fmt.Errorf("turn %d (%s) failed: %w", turn, ag.Name(), runErr)
 		}
-
-		ui.TurnDone(turn, ag.Name(), elapsed, result.Output)
 
 		// Relocate task dir if the agent worked in a different directory.
 		if err := o.maybeRelocateTaskDir(); err != nil {
@@ -294,6 +306,40 @@ func (o *Orchestrator) maybeRelocateTaskDir() error {
 	ui.Relocated(oldDir, o.taskLog.Dir)
 	o.cfg.WorkDir = reported
 	return nil
+}
+
+// runTurnWithTUI runs an agent turn with a bubbletea TUI for live output.
+// The agent runs in a goroutine, pushing events to a channel that feeds the TUI.
+// The TUI blocks until the agent finishes AND the user presses q to continue.
+func (o *Orchestrator) runTurnWithTUI(ctx context.Context, ag agent.Agent, prompt string, turn int) (agent.TurnResult, error) {
+	// Set up event channel — the agent pushes events, the TUI consumes them.
+	eventCh := make(chan claudeagent.StreamEvent, 100)
+
+	if ca, ok := ag.(*claudeagent.Agent); ok {
+		ca.OnEvent = func(evt claudeagent.StreamEvent) {
+			eventCh <- evt
+		}
+	}
+
+	// Run agent in background.
+	type turnOutcome struct {
+		result agent.TurnResult
+		err    error
+	}
+	outcomeCh := make(chan turnOutcome, 1)
+
+	go func() {
+		r, e := ag.RunTurn(ctx, o.cfg.WorkDir, prompt)
+		close(eventCh) // signal no more events → TUI switches to review mode
+		outcomeCh <- turnOutcome{r, e}
+	}()
+
+	// Launch bubbletea TUI — blocks until agent is done and user presses q.
+	tui.RunAgentView(eventCh, ag.Name(), o.agentModel(ag.Name()), turn, o.cfg.MaxTurns)
+
+	// Collect agent result.
+	outcome := <-outcomeCh
+	return outcome.result, outcome.err
 }
 
 // buildPrompt constructs the full prompt string for a given agent turn.
