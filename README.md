@@ -264,6 +264,23 @@ The orchestrator stops when the last **two consecutive turns** both report `Comp
             └── turn-2-agent-beta-raw.log
 ```
 
+### Git recommendations
+
+Add the task logs to your project's `.gitignore` — they contain verbose agent output and are only useful locally:
+
+```gitignore
+# departai task logs (local agent output)
+.departai/tasks/
+```
+
+However, **keep `.departai/config.yml` tracked** if you work in a team. This way all developers share the same departai settings (models, max turns, instructions file) when collaborating on the project:
+
+```gitignore
+# departai — ignore task logs, keep config
+.departai/tasks/
+!.departai/config.yml
+```
+
 ### Raw turn logs
 
 Each turn generates a log file with:
