@@ -110,7 +110,7 @@ func extractToolDetail(name string, raw json.RawMessage) string {
 		return jsonStringField(raw, "file_path")
 	case "Bash":
 		cmd := jsonStringField(raw, "command")
-		return truncate(cmd, 80)
+		return singleLine(cmd)
 	case "Grep":
 		return fmt.Sprintf("%q", jsonStringField(raw, "pattern"))
 	case "Glob":
@@ -142,12 +142,9 @@ func jsonStringField(raw json.RawMessage, key string) string {
 	return s
 }
 
-// truncate shortens s to maxLen characters, adding "…" if truncated.
-func truncate(s string, maxLen int) string {
+// singleLine collapses a multi-line string into a single line.
+func singleLine(s string) string {
 	s = strings.TrimSpace(s)
 	s = strings.ReplaceAll(s, "\n", " ")
-	if len(s) <= maxLen {
-		return s
-	}
-	return s[:maxLen-1] + "…"
+	return s
 }

@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/manurgdev/departai/internal/agent"
 	claudeagent "github.com/manurgdev/departai/internal/agent/claude"
@@ -239,6 +240,7 @@ func (o *Orchestrator) Run() error {
 	ui.Header(o.taskLog.TaskID, o.taskLog.Dir, o.cfg.WorkDir)
 
 	ctx := context.Background()
+	taskStart := time.Now()
 
 	for turn := 1; turn <= o.cfg.MaxTurns; turn++ {
 		ag := o.agents[(turn-1)%len(o.agents)]
@@ -248,7 +250,7 @@ func (o *Orchestrator) Run() error {
 			return fmt.Errorf("building prompt for turn %d: %w", turn, err)
 		}
 
-		result, runErr := o.runTurnWithTUI(ctx, ag, prompt, turn)
+		result, runErr := o.runTurnWithTUI(ctx, ag, prompt, turn, taskStart)
 
 		// Always persist raw logs — even on error, for diagnostics.
 		if logErr := o.taskLog.WriteRawLog(turn, ag.Name(), result.Activity, result.Output, result.Stderr); logErr != nil {
@@ -311,7 +313,7 @@ func (o *Orchestrator) maybeRelocateTaskDir() error {
 // runTurnWithTUI runs an agent turn with a bubbletea TUI for live output.
 // The agent runs in a goroutine, pushing events to a channel that feeds the TUI.
 // The TUI blocks until the agent finishes AND the user presses q to continue.
-func (o *Orchestrator) runTurnWithTUI(ctx context.Context, ag agent.Agent, prompt string, turn int) (agent.TurnResult, error) {
+func (o *Orchestrator) runTurnWithTUI(ctx context.Context, ag agent.Agent, prompt string, turn int, taskStart time.Time) (agent.TurnResult, error) {
 	// Set up event channel — the agent pushes events, the TUI consumes them.
 	eventCh := make(chan claudeagent.StreamEvent, 100)
 
@@ -335,7 +337,7 @@ func (o *Orchestrator) runTurnWithTUI(ctx context.Context, ag agent.Agent, promp
 	}()
 
 	// Launch bubbletea TUI — blocks until agent is done and user presses q.
-	tui.RunAgentView(eventCh, ag.Name(), o.agentModel(ag.Name()), turn, o.cfg.MaxTurns)
+	tui.RunAgentView(eventCh, ag.Name(), o.agentModel(ag.Name()), turn, o.cfg.MaxTurns, taskStart)
 
 	// Collect agent result.
 	outcome := <-outcomeCh

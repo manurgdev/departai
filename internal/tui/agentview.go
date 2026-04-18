@@ -27,8 +27,9 @@ func RunAgentView(
 	eventCh <-chan claude.StreamEvent,
 	agentName, model string,
 	turn, maxTurns int,
+	taskStart time.Time,
 ) string {
-	m := newModel(eventCh, agentName, model, turn, maxTurns)
+	m := newModel(eventCh, agentName, model, turn, maxTurns, taskStart)
 	p := tea.NewProgram(m, tea.WithAltScreen())
 	final, _ := p.Run()
 	fm := final.(Model)
@@ -71,16 +72,22 @@ type Model struct {
 	turn      int
 	maxTurns  int
 	result    string
-	startTime time.Time
+	startTime time.Time // when this turn started
 	elapsed   time.Duration
+	taskStart time.Time // when the entire task started (across all turns)
 
 	countdownLeft time.Duration
+	spinnerFrame  int
 }
+
+// spinnerChars are the frames for the footer spinner animation.
+var spinnerChars = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 
 func newModel(
 	ch <-chan claude.StreamEvent,
 	agentName, model string,
 	turn, maxTurns int,
+	taskStart time.Time,
 ) Model {
 	return Model{
 		eventCh:   ch,
@@ -91,6 +98,7 @@ func newModel(
 		phase:     phaseStreaming,
 		cursor:    0,
 		startTime: time.Now(),
+		taskStart: taskStart,
 	}
 }
 
@@ -116,7 +124,7 @@ func countdownTick() tea.Cmd {
 }
 
 func elapsedTick() tea.Cmd {
-	return tea.Tick(time.Second, func(_ time.Time) tea.Msg { return elapsedTickMsg{} })
+	return tea.Tick(200*time.Millisecond, func(_ time.Time) tea.Msg { return elapsedTickMsg{} })
 }
 
 // ── Init / Update / View ────────────────────────────────────────────────────
@@ -163,6 +171,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case elapsedTickMsg:
 		if m.phase == phaseStreaming {
 			m.elapsed = time.Since(m.startTime)
+			m.spinnerFrame = (m.spinnerFrame + 1) % len(spinnerChars)
 			return m, elapsedTick()
 		}
 		return m, nil
@@ -259,7 +268,10 @@ func (m *Model) rebuildContent() {
 
 	if m.result != "" && m.phase != phaseStreaming {
 		b.WriteString("\n")
-		b.WriteString(styleGreen.Render("  ✓ ") + styleFaint.Render(truncateResult(m.result, 120)) + "\n")
+		b.WriteString(styleGreen.Render("  ✓ Result:") + "\n")
+		for _, line := range strings.Split(m.result, "\n") {
+			b.WriteString(styleFaint.Render("  "+line) + "\n")
+		}
 	}
 
 	m.viewport.SetContent(b.String())
@@ -335,7 +347,12 @@ func (m Model) renderHeader() string {
 func (m Model) renderFooter() string {
 	switch m.phase {
 	case phaseStreaming:
-		return styleFaint.Render("  streaming...")
+		totalElapsed := time.Since(m.taskStart).Round(time.Second)
+		spinner := styleBoldCyn.Render(spinnerChars[m.spinnerFrame])
+		return fmt.Sprintf("  %s %s  %s",
+			spinner,
+			styleFaint.Render("working..."),
+			styleFaint.Render(fmt.Sprintf("(total %s)", totalElapsed)))
 	case phaseCountdown:
 		secs := int(m.countdownLeft.Seconds())
 		if secs < 1 {
@@ -366,13 +383,27 @@ func printFinalSummary(m Model) {
 		styleGreen.Render(fmt.Sprintf("  (%s)", elapsed)))
 	fmt.Println(styleRule.Render("  " + rule))
 
+	// Print all entries — text (reasoning) and tool calls.
 	for _, e := range m.entries {
-		if e.kind == "tool" {
+		switch e.kind {
+		case "text":
+			for _, line := range strings.Split(e.title, "\n") {
+				if trimmed := strings.TrimSpace(line); trimmed != "" {
+					fmt.Println(styleFaint.Render("  " + trimmed))
+				}
+			}
+		case "tool":
 			fmt.Println(styleBoldCyn.Render("  → ") + styleFaint.Render(e.title))
 		}
 	}
+
+	// Print full result.
 	if m.result != "" {
-		fmt.Println(styleGreen.Render("  ✓ ") + styleFaint.Render(truncateResult(m.result, 120)))
+		fmt.Println()
+		fmt.Println(styleGreen.Render("  ✓ Result:"))
+		for _, line := range strings.Split(m.result, "\n") {
+			fmt.Println(styleFaint.Render("  " + line))
+		}
 	}
 	fmt.Println()
 }
@@ -397,11 +428,3 @@ func formatDiff(old, new string) string {
 	return strings.TrimRight(b.String(), "\n")
 }
 
-func truncateResult(s string, maxLen int) string {
-	s = strings.TrimSpace(s)
-	s = strings.ReplaceAll(s, "\n", " ")
-	if len(s) <= maxLen {
-		return s
-	}
-	return s[:maxLen-1] + "…"
-}
