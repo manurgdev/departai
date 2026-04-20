@@ -10,5 +10,4 @@ departai
 *.swp
 *.swo
 
-# Task data (optional — uncomment to exclude from repo)
-# .departai/
+.departai/tasks
