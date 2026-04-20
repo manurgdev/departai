@@ -9,7 +9,7 @@ import (
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 
-	claude "github.com/manurgdev/departai/internal/agent/claude"
+	"github.com/manurgdev/departai/internal/agent"
 )
 
 // ── public API ──────────────────────────────────────────────────────────────
@@ -25,7 +25,7 @@ const AutoContinueDelay = 5 * time.Second
 // After bubbletea exits, a compact summary is printed to the normal terminal
 // so the turn activity persists in scroll-back history.
 func RunAgentView(
-	eventCh <-chan claude.StreamEvent,
+	eventCh <-chan agent.StreamEvent,
 	cancelAgent context.CancelFunc,
 	agentName, model string,
 	turn, maxTurns int,
@@ -68,7 +68,7 @@ type Model struct {
 	viewport  viewport.Model
 	ready     bool // viewport initialised after first WindowSizeMsg
 
-	eventCh   <-chan claude.StreamEvent
+	eventCh   <-chan agent.StreamEvent
 	agentName string
 	model     string
 	turn      int
@@ -88,7 +88,7 @@ type Model struct {
 var spinnerChars = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 
 func newModel(
-	ch <-chan claude.StreamEvent,
+	ch <-chan agent.StreamEvent,
 	cancel context.CancelFunc,
 	agentName, model string,
 	turn, maxTurns int,
@@ -110,12 +110,12 @@ func newModel(
 
 // ── messages ────────────────────────────────────────────────────────────────
 
-type eventMsg claude.StreamEvent
+type eventMsg agent.StreamEvent
 type channelClosedMsg struct{}
 type countdownTickMsg struct{}
 type elapsedTickMsg struct{}
 
-func waitForEvent(ch <-chan claude.StreamEvent) tea.Cmd {
+func waitForEvent(ch <-chan agent.StreamEvent) tea.Cmd {
 	return func() tea.Msg {
 		evt, ok := <-ch
 		if !ok {
@@ -160,7 +160,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case eventMsg:
-		m.addEvent(claude.StreamEvent(msg))
+		m.addEvent(agent.StreamEvent(msg))
 		m.rebuildContent()
 		return m, waitForEvent(m.eventCh)
 
@@ -298,7 +298,7 @@ func (m *Model) rebuildContent() {
 	}
 }
 
-func (m *Model) addEvent(evt claude.StreamEvent) {
+func (m *Model) addEvent(evt agent.StreamEvent) {
 	switch evt.Kind {
 	case "text":
 		m.entries = append(m.entries, entry{kind: "text", title: evt.Text})
@@ -439,7 +439,7 @@ func printFinalSummary(m Model) {
 
 // ── tool detail builders ────────────────────────────────────────────────────
 
-func buildToolDetail(evt claude.StreamEvent) string {
+func buildToolDetail(evt agent.StreamEvent) string {
 	if evt.Tool == "Edit" && (evt.DiffOld != "" || evt.DiffNew != "") {
 		return formatDiff(evt.DiffOld, evt.DiffNew)
 	}

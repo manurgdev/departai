@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	claudeagent "github.com/manurgdev/departai/internal/agent/claude"
+	codexagent "github.com/manurgdev/departai/internal/agent/codex"
 	"github.com/manurgdev/departai/internal/config"
 	"github.com/manurgdev/departai/internal/ui"
 )
@@ -81,19 +82,25 @@ func Run(args []string) error {
 	if *maxTurnsFlag != 0 {
 		cfg.MaxTurns = *maxTurnsFlag
 	}
-	if *modelFlag != "" {
-		// Validate the CLI-provided model against the backend before proceeding —
-		// catches typos at parse time instead of mid-task.
-		if err := claudeagent.ValidateModel(context.Background(), *modelFlag); err != nil {
-			return fmt.Errorf("--model %q rejected by claude: %s", *modelFlag, err)
-		}
-		cfg.Model = *modelFlag
-	}
 	if *instructionsFlag != "" {
 		cfg.InstructionsFile = *instructionsFlag
 	}
 	if *backendFlag != "" {
 		cfg.AgentBackend = *backendFlag
+	}
+	if *modelFlag != "" {
+		// Validate the CLI-provided model against the active backend.
+		var valErr error
+		switch cfg.AgentBackend {
+		case "codex":
+			valErr = codexagent.ValidateModel(context.Background(), *modelFlag)
+		default:
+			valErr = claudeagent.ValidateModel(context.Background(), *modelFlag)
+		}
+		if valErr != nil {
+			return fmt.Errorf("--model %q rejected by %s: %s", *modelFlag, cfg.AgentBackend, valErr)
+		}
+		cfg.Model = *modelFlag
 	}
 
 	// No prompt argument → interactive REPL mode.

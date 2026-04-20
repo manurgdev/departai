@@ -12,6 +12,7 @@ import (
 
 	"github.com/manurgdev/departai/internal/agent"
 	claudeagent "github.com/manurgdev/departai/internal/agent/claude"
+	codexagent "github.com/manurgdev/departai/internal/agent/codex"
 	"github.com/manurgdev/departai/internal/tasklog"
 	"github.com/manurgdev/departai/internal/tui"
 	"github.com/manurgdev/departai/internal/ui"
@@ -159,7 +160,9 @@ type Config struct {
 	Prompt           string // original task from the user
 	InstructionsFile string // optional path to a custom base instructions file
 	MaxTurns         int    // safety cap; 0 defaults to 10
-	AgentBackend     string // which CLI backend to use (currently only "claude")
+	AgentBackend     string // default backend for all agents
+	BackendAlpha     string // override backend for Agent Alpha
+	BackendBeta      string // override backend for Agent Beta
 	Model            string // default model for all agents (optional)
 	ModelAlpha       string // override for Agent Alpha (optional)
 	ModelBeta        string // override for Agent Beta (optional)
@@ -241,19 +244,42 @@ func (o *Orchestrator) TaskDir() string {
 	return o.taskLog.Dir
 }
 
-// buildAgents constructs the two agent instances based on the configured backend.
-// Each agent uses its per-agent model override if set, else the global Model.
-// OnEvent is NOT set here — the orchestrator's Run loop sets it per-turn to
-// feed events into the bubbletea TUI via a channel.
+// buildAgents constructs the two agent instances. Each agent can use a different
+// backend (Claude, Codex) and model — enabling cross-vendor collaboration.
 func buildAgents(cfg Config) ([]agent.Agent, error) {
-	switch cfg.AgentBackend {
-	case "claude", "":
-		alpha := claudeagent.NewWithModel("Agent Alpha", modelOrDefault(cfg.ModelAlpha, cfg.Model))
-		beta := claudeagent.NewWithModel("Agent Beta", modelOrDefault(cfg.ModelBeta, cfg.Model))
-		return []agent.Agent{alpha, beta}, nil
-	default:
-		return nil, fmt.Errorf("unknown agent backend %q (supported: claude)", cfg.AgentBackend)
+	alpha, err := buildOneAgent("Agent Alpha",
+		backendOrDefault(cfg.BackendAlpha, cfg.AgentBackend),
+		modelOrDefault(cfg.ModelAlpha, cfg.Model))
+	if err != nil {
+		return nil, err
 	}
+
+	beta, err := buildOneAgent("Agent Beta",
+		backendOrDefault(cfg.BackendBeta, cfg.AgentBackend),
+		modelOrDefault(cfg.ModelBeta, cfg.Model))
+	if err != nil {
+		return nil, err
+	}
+
+	return []agent.Agent{alpha, beta}, nil
+}
+
+func buildOneAgent(name, backend, model string) (agent.Agent, error) {
+	switch backend {
+	case "claude", "":
+		return claudeagent.NewWithModel(name, model), nil
+	case "codex":
+		return codexagent.NewWithModel(name, model), nil
+	default:
+		return nil, fmt.Errorf("unknown backend %q for %s (supported: claude, codex)", backend, name)
+	}
+}
+
+func backendOrDefault(override, fallback string) string {
+	if override != "" {
+		return override
+	}
+	return fallback
 }
 
 // modelOrDefault returns override if non-empty, otherwise fallback.
@@ -273,6 +299,20 @@ func (o *Orchestrator) agentModel(name string) string {
 		return modelOrDefault(o.cfg.ModelBeta, o.cfg.Model)
 	}
 	return o.cfg.Model
+}
+
+// agentBackend returns the effective backend for the named agent.
+func (o *Orchestrator) agentBackend(name string) string {
+	switch name {
+	case "Agent Alpha":
+		return backendOrDefault(o.cfg.BackendAlpha, o.cfg.AgentBackend)
+	case "Agent Beta":
+		return backendOrDefault(o.cfg.BackendBeta, o.cfg.AgentBackend)
+	}
+	if o.cfg.AgentBackend == "" {
+		return "claude"
+	}
+	return o.cfg.AgentBackend
 }
 
 // Run executes the relay loop. It returns nil on successful completion (consensus
@@ -372,15 +412,15 @@ func (o *Orchestrator) runTurnWithTUI(ag agent.Agent, prompt string, turn int, t
 	defer cancel()
 
 	// Event channel — agent pushes events, TUI consumes them.
-	eventCh := make(chan claudeagent.StreamEvent, 100)
+	eventCh := make(chan agent.StreamEvent, 100)
 
-	if ca, ok := ag.(*claudeagent.Agent); ok {
-		ca.OnEvent = func(evt claudeagent.StreamEvent) {
+	if sa, ok := ag.(agent.StreamingAgent); ok {
+		sa.SetOnEvent(func(evt agent.StreamEvent) {
 			eventCh <- evt
-		}
-		ca.OnStreamDone = func() {
+		})
+		sa.SetOnStreamDone(func() {
 			close(eventCh) // TUI gets channelClosedMsg immediately
-		}
+		})
 	}
 
 	// Run agent in background.
@@ -398,7 +438,13 @@ func (o *Orchestrator) runTurnWithTUI(ag agent.Agent, prompt string, turn int, t
 
 	// Launch bubbletea TUI — blocks until agent finishes (+ auto-continue or review)
 	// or user presses ESC (which calls cancel, killing the agent).
-	_, stopped := tui.RunAgentView(eventCh, cancel, ag.Name(), o.agentModel(ag.Name()), turn, o.cfg.MaxTurns, taskStart)
+	agBackend := o.agentBackend(ag.Name())
+	agModel := o.agentModel(ag.Name())
+	backendModel := agBackend
+	if agModel != "" {
+		backendModel += "/" + agModel
+	}
+	_, stopped := tui.RunAgentView(eventCh, cancel, ag.Name(), backendModel, turn, o.cfg.MaxTurns, taskStart)
 
 	// Collect agent result.
 	outcome := <-outcomeCh

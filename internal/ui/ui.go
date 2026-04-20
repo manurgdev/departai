@@ -13,6 +13,8 @@ import (
 	"github.com/briandowns/spinner"
 	"github.com/fatih/color"
 	"github.com/manifoldco/promptui"
+
+	"github.com/manurgdev/departai/internal/config"
 )
 
 // ── colour palette ──────────────────────────────────────────────────────────
@@ -174,22 +176,19 @@ func Error(msg string) {
 // WelcomeBanner prints the startup banner for interactive mode with config summary.
 // Shows effective per-agent models (override if set, else global) and the
 // instructions file only if a custom one was provided.
-func WelcomeBanner(workDir, backend, model, modelAlpha, modelBeta, instructionsFile string, maxTurns int) {
+func WelcomeBanner(workDir string, cfg config.Config) {
 	fmt.Println()
 	boldCyan.Println("  DepartAI — AI Agent Orchestrator")
 	fmt.Println()
 	faint.Printf("  Work dir     : %s\n", workDir)
-	faint.Printf("  Backend      : %s\n", backend)
-	faint.Printf("  Max turns    : %s\n", maxTurnsDisplay(maxTurns))
-	if instructionsFile != "" {
-		faint.Printf("  Instructions : %s\n", instructionsFile)
+	faint.Printf("  Max turns    : %s\n", maxTurnsDisplay(cfg.MaxTurns))
+	if cfg.InstructionsFile != "" {
+		faint.Printf("  Instructions : %s\n", cfg.InstructionsFile)
 	}
 	fmt.Println()
-	faint.Println("  Models:")
-	faint.Printf("    Alpha Global : %s\n", modelDisplay(model))
-	faint.Printf("    Alpha Local  : %s\n", localOverride(modelAlpha))
-	faint.Printf("    Beta Global  : %s\n", modelDisplay(model))
-	faint.Printf("    Beta Local   : %s\n", localOverride(modelBeta))
+	faint.Println("  Agents:")
+	faint.Printf("    Alpha : %s / %s\n", cfg.BackendFor("alpha"), modelDisplay(cfg.ModelFor("alpha")))
+	faint.Printf("    Beta  : %s / %s\n", cfg.BackendFor("beta"), modelDisplay(cfg.ModelFor("beta")))
 	fmt.Println()
 	faint.Println("  Type a task to start, or /help for commands.")
 	fmt.Println()
@@ -224,6 +223,9 @@ func InteractiveHelp() {
 	fmt.Println("    /resume                      Select a previous task (does not run it)")
 	fmt.Println("    /new                         Deselect current task (next prompt = new task)")
 	fmt.Println("    /exit, /quit                 Exit departai")
+	fmt.Println()
+	bold.Println("  Backends:")
+	fmt.Println("    claude (default), codex")
 	fmt.Println()
 	bold.Println("  Config keys:")
 	fmt.Println("    model, model.alpha, model.beta, backend, max-turns, instructions")
@@ -331,19 +333,15 @@ func ValidationFailed(target, model, errMsg string) {
 
 // ShowConfig prints the current configuration, including per-agent model
 // overrides when they are set (non-empty).
-func ShowConfig(workDir, backend, model, modelAlpha, modelBeta string, maxTurns int) {
+func ShowConfig(workDir string, cfg config.Config) {
 	fmt.Println()
 	bold.Println("  Current configuration:")
 	fmt.Printf("    Work dir     : %s\n", workDir)
-	fmt.Printf("    Backend      : %s\n", backend)
-	fmt.Printf("    Model        : %s\n", modelDisplay(model))
-	if modelAlpha != "" {
-		fmt.Printf("    Model Alpha  : %s\n", modelAlpha)
-	}
-	if modelBeta != "" {
-		fmt.Printf("    Model Beta   : %s\n", modelBeta)
-	}
-	fmt.Printf("    Max turns    : %s\n", maxTurnsDisplay(maxTurns))
+	fmt.Printf("    Max turns    : %s\n", maxTurnsDisplay(cfg.MaxTurns))
+	fmt.Println()
+	fmt.Println("    Agents:")
+	fmt.Printf("      Alpha : %s / %s\n", cfg.BackendFor("alpha"), modelDisplay(cfg.ModelFor("alpha")))
+	fmt.Printf("      Beta  : %s / %s\n", cfg.BackendFor("beta"), modelDisplay(cfg.ModelFor("beta")))
 	fmt.Println()
 }
 

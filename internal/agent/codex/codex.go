@@ -1,5 +1,5 @@
-// Package claude implements the agent.Agent interface using the Claude Code CLI.
-package claude
+// Package codex implements the agent.Agent interface using the OpenAI Codex CLI.
+package codex
 
 import (
 	"bufio"
@@ -13,7 +13,7 @@ import (
 	"github.com/manurgdev/departai/internal/agent"
 )
 
-// Agent runs turns by spawning the `claude` CLI process in non-interactive mode.
+// Agent runs turns by spawning the `codex` CLI process in non-interactive mode.
 type Agent struct {
 	name         string
 	model        string
@@ -21,12 +21,12 @@ type Agent struct {
 	onStreamDone func()
 }
 
-// New creates a Claude Code CLI agent with the given display name.
+// New creates a Codex CLI agent with the given display name.
 func New(name string) *Agent {
 	return &Agent{name: name}
 }
 
-// NewWithModel creates a Claude Code CLI agent that uses a specific model.
+// NewWithModel creates a Codex CLI agent that uses a specific model.
 func NewWithModel(name, model string) *Agent {
 	return &Agent{name: name, model: model}
 }
@@ -39,20 +39,20 @@ func (a *Agent) SetOnEvent(fn func(agent.StreamEvent)) { a.onEvent = fn }
 // SetOnStreamDone implements agent.StreamingAgent.
 func (a *Agent) SetOnStreamDone(fn func()) { a.onStreamDone = fn }
 
-// RunTurn spawns `claude` in non-interactive mode with stream-json output.
+// RunTurn spawns `codex exec` in non-interactive mode with JSONL output.
 func (a *Agent) RunTurn(ctx context.Context, workDir string, prompt string) (agent.TurnResult, error) {
 	args := []string{
-		"--dangerously-skip-permissions",
-		"--verbose",
-		"--output-format", "stream-json",
-		"-p", prompt,
+		"exec",
+		"--dangerously-bypass-approvals-and-sandbox",
+		"--json",
+		"-C", workDir,
 	}
 	if a.model != "" {
-		args = append(args, "--model", a.model)
+		args = append(args, "-m", a.model)
 	}
+	args = append(args, prompt)
 
-	cmd := exec.CommandContext(ctx, "claude", args...)
-	cmd.Dir = workDir
+	cmd := exec.CommandContext(ctx, "codex", args...)
 
 	stdoutPipe, err := cmd.StdoutPipe()
 	if err != nil {
@@ -67,8 +67,9 @@ func (a *Agent) RunTurn(ctx context.Context, workDir string, prompt string) (age
 	}
 
 	var (
-		finalResult string
+		lastMessage string // track the last agent_message as result
 		activity    []string
+		seenTools   = make(map[string]bool) // deduplicate started+completed
 	)
 
 	scanner := bufio.NewScanner(stdoutPipe)
@@ -81,13 +82,18 @@ func (a *Agent) RunTurn(ctx context.Context, workDir string, prompt string) (age
 		for _, evt := range events {
 			switch evt.Kind {
 			case "tool":
-				entry := evt.Tool
-				if evt.Detail != "" {
-					entry += " " + evt.Detail
+				// Deduplicate: item.started and item.completed emit the same tool
+				key := evt.Tool + "|" + evt.Detail
+				if !seenTools[key] {
+					seenTools[key] = true
+					entry := evt.Tool
+					if evt.Detail != "" {
+						entry += " " + evt.Detail
+					}
+					activity = append(activity, entry)
 				}
-				activity = append(activity, entry)
-			case "result":
-				finalResult = evt.Result
+			case "text":
+				lastMessage = evt.Text
 			}
 
 			if a.onEvent != nil {
@@ -108,20 +114,20 @@ func (a *Agent) RunTurn(ctx context.Context, workDir string, prompt string) (age
 			errMsg = "(no stderr output)"
 		}
 		return agent.TurnResult{
-			Output:   finalResult,
+			Output:   lastMessage,
 			Stderr:   errMsg,
 			Activity: activity,
 		}, fmt.Errorf("agent %q exited with error: %w\nstderr: %s", a.name, waitErr, errMsg)
 	}
 
 	return agent.TurnResult{
-		Output:   finalResult,
+		Output:   lastMessage,
 		Stderr:   stderr.String(),
 		Activity: activity,
 	}, nil
 }
 
-// ValidateModel checks that the given model name is accepted by the claude CLI.
+// ValidateModel checks that the given model name is accepted by the codex CLI.
 func ValidateModel(ctx context.Context, model string) error {
 	if model == "" {
 		return nil
@@ -130,11 +136,11 @@ func ValidateModel(ctx context.Context, model string) error {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "claude",
-		"-p", "ok",
-		"--model", model,
-		"--dangerously-skip-permissions",
-		"--output-format", "text",
+	cmd := exec.CommandContext(ctx, "codex", "exec",
+		"--dangerously-bypass-approvals-and-sandbox",
+		"--json",
+		"-m", model,
+		"say ok",
 	)
 
 	var stdout, stderr bytes.Buffer
@@ -150,12 +156,6 @@ func ValidateModel(ctx context.Context, model string) error {
 			msg = err.Error()
 		}
 		return fmt.Errorf("%s", msg)
-	}
-
-	out := stdout.String()
-	if strings.Contains(out, "issue with the selected model") ||
-		strings.Contains(out, "It may not exist") {
-		return fmt.Errorf("%s", strings.TrimSpace(out))
 	}
 
 	return nil

@@ -1,6 +1,6 @@
 # departai
 
-AI agent orchestrator CLI that runs two Claude Code agents in sequential relay turns on a shared coding task. Each agent can use its own model. Agents hand off context through a shared task log, critically review each other's work, and only stop when both independently agree the task is complete.
+AI agent orchestrator CLI that runs two AI coding agents in sequential relay turns on a shared task. Each agent can use a **different backend and model** — e.g. Alpha on Claude opus, Beta on Codex. Agents hand off context through a shared task log, critically review each other's work, and only stop when both independently agree the task is complete.
 
 ## How It Works
 
@@ -47,14 +47,23 @@ go build -o departai .
 mv departai /usr/local/bin/departai   # or anywhere on $PATH
 ```
 
-### Prerequisite
+### Prerequisites
 
-[Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) must be installed and authenticated:
+At least one supported AI CLI must be installed and authenticated:
 
+**Claude Code CLI** (default backend):
 ```bash
 npm install -g @anthropic-ai/claude-code
 claude --version
 ```
+
+**Codex CLI** (alternative backend):
+```bash
+npm install -g @openai/codex
+codex --version
+```
+
+You can switch backends with `/config set backend codex` or `--backend codex`.
 
 ## Usage
 
@@ -166,7 +175,9 @@ All commands use the `/` prefix with hierarchical autocomplete.
 | `model` | `/config set model opus` | Global model for both agents (validated) |
 | `model.alpha` | `/config set model.alpha opus` | Override for Agent Alpha (validated) |
 | `model.beta` | `/config set model.beta sonnet` | Override for Agent Beta (validated) |
-| `backend` | `/config set backend claude` | Agent backend |
+| `backend` | `/config set backend codex` | Default backend (`claude` or `codex`) |
+| `backend.alpha` | `/config set backend.alpha claude` | Override backend for Agent Alpha |
+| `backend.beta` | `/config set backend.beta codex` | Override backend for Agent Beta |
 | `max-turns` | `/config set max-turns 20` | Max turns per run (0 = unlimited) |
 | `instructions` | `/config set instructions ./rules.md` | Custom instructions file |
 
@@ -184,7 +195,7 @@ After any config change, a menu asks where to save: **Project** (default), **Glo
 |------|---------|-------------|
 | `--dir` | current directory | Working directory where agents operate |
 | `--model` | (backend default) | Global model (validated on startup) |
-| `--backend` | `claude` | Agent backend CLI to use |
+| `--backend` | `claude` | Agent backend: `claude` or `codex` |
 | `--instructions` | built-in | Path to custom agent protocol markdown file |
 | `--max-turns` | unlimited (0) | Max turns per run; 0 = no limit |
 
@@ -200,11 +211,17 @@ YAML config files loaded in layers (later wins):
 
 ```yaml
 # .departai/config.yml
-agent_backend: claude
+
+agent_backend: claude           # default backend: "claude" or "codex"
+backend_alpha: claude           # per-agent backend overrides (optional)
+backend_beta: codex             # Alpha uses Claude, Beta uses Codex
+
 max_turns: 0                    # 0 = unlimited
-model: claude-opus-4-5          # global default
-model_alpha: claude-opus-4-5    # per-agent overrides (optional)
-model_beta: claude-sonnet-4-5
+
+model: claude-opus-4-5          # default model (model names depend on the backend)
+model_alpha: claude-opus-4-5    # per-agent model overrides (optional)
+model_beta: gpt-5.3-codex       # each agent can use its backend's models
+
 # instructions_file: ./my-instructions.md
 ```
 
@@ -322,10 +339,13 @@ departai/
     ├── ui/
     │   └── ui.go               # styled terminal output, spinners, colors
     ├── agent/
-    │   ├── agent.go            # Agent interface + TurnResult type
-    │   └── claude/
-    │       ├── claude.go       # Claude Code CLI implementation + model validation
-    │       └── stream.go       # stream-json parser for live tool call display
+    │   ├── agent.go            # Agent, StreamingAgent, StreamEvent interfaces
+    │   ├── claude/
+    │   │   ├── claude.go       # Claude Code CLI implementation + model validation
+    │   │   └── stream.go       # Claude stream-json parser
+    │   └── codex/
+    │       ├── codex.go        # Codex CLI implementation + model validation
+    │       └── stream.go       # Codex JSONL parser
     ├── orchestrator/
     │   └── orchestrator.go     # turn loop, prompt builder, consensus, resume, ESC-to-stop
     └── tasklog/
@@ -357,3 +377,12 @@ type Agent interface {
 ```
 
 Then add a case to `buildAgents()` in `orchestrator.go` and select it with `--backend <name>` or `agent_backend: <name>` in config.
+
+### Supported backends
+
+| Backend | CLI | Auto-approve flag | Output format |
+|---------|-----|-------------------|---------------|
+| `claude` | `claude -p <prompt>` | `--dangerously-skip-permissions` | `--output-format stream-json` |
+| `codex` | `codex exec <prompt>` | `--dangerously-bypass-approvals-and-sandbox` | `--json` (JSONL) |
+
+Both backends implement the `agent.StreamingAgent` interface, providing live tool-call streaming via the bubbletea TUI. Model validation is backend-specific — each backend's `ValidateModel` function runs a minimal test prompt to verify the model name is accepted.

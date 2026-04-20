@@ -14,12 +14,33 @@ import (
 // Config holds all user-configurable departai settings.
 // Fields map 1:1 to YAML keys and CLI flags.
 type Config struct {
-	AgentBackend     string `yaml:"agent_backend"`
+	AgentBackend     string `yaml:"agent_backend"`                // default backend for all agents
+	BackendAlpha     string `yaml:"backend_alpha,omitempty"`      // override for Agent Alpha
+	BackendBeta      string `yaml:"backend_beta,omitempty"`       // override for Agent Beta
 	MaxTurns         int    `yaml:"max_turns"`
-	Model            string `yaml:"model"`                  // default model for all agents
-	ModelAlpha       string `yaml:"model_alpha,omitempty"`  // override for Agent Alpha
-	ModelBeta        string `yaml:"model_beta,omitempty"`   // override for Agent Beta
+	Model            string `yaml:"model"`                        // default model for all agents
+	ModelAlpha       string `yaml:"model_alpha,omitempty"`        // override for Agent Alpha
+	ModelBeta        string `yaml:"model_beta,omitempty"`         // override for Agent Beta
 	InstructionsFile string `yaml:"instructions_file"`
+}
+
+// BackendFor returns the backend to use for the given agent name, preferring
+// the agent-specific override and falling back to the global AgentBackend.
+func (c Config) BackendFor(agentName string) string {
+	switch strings.ToLower(agentName) {
+	case "alpha", "agent alpha":
+		if c.BackendAlpha != "" {
+			return c.BackendAlpha
+		}
+	case "beta", "agent beta":
+		if c.BackendBeta != "" {
+			return c.BackendBeta
+		}
+	}
+	if c.AgentBackend == "" {
+		return "claude"
+	}
+	return c.AgentBackend
 }
 
 // ModelFor returns the model to use for the given agent name, preferring
@@ -165,6 +186,12 @@ func loadFile(path string, dst *Config) error {
 func merge(dst *Config, src Config) {
 	if src.AgentBackend != "" {
 		dst.AgentBackend = src.AgentBackend
+	}
+	if src.BackendAlpha != "" {
+		dst.BackendAlpha = src.BackendAlpha
+	}
+	if src.BackendBeta != "" {
+		dst.BackendBeta = src.BackendBeta
 	}
 	if src.MaxTurns != 0 {
 		dst.MaxTurns = src.MaxTurns

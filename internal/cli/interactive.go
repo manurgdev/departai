@@ -14,6 +14,7 @@ import (
 	"golang.org/x/term"
 
 	claudeagent "github.com/manurgdev/departai/internal/agent/claude"
+	codexagent "github.com/manurgdev/departai/internal/agent/codex"
 	"github.com/manurgdev/departai/internal/config"
 	"github.com/manurgdev/departai/internal/orchestrator"
 	"github.com/manurgdev/departai/internal/tasklog"
@@ -23,7 +24,7 @@ import (
 // runInteractive starts the REPL that lets users type tasks interactively.
 // Slash commands get autocomplete via go-prompt; everything else is a task prompt.
 func runInteractive(workDir string, cfg config.Config) error {
-	ui.WelcomeBanner(workDir, cfg.AgentBackend, cfg.Model, cfg.ModelAlpha, cfg.ModelBeta, cfg.InstructionsFile, cfg.MaxTurns)
+	ui.WelcomeBanner(workDir, cfg)
 
 	// Save terminal state before go-prompt switches to raw mode.
 	// Needed for clean exit via Ctrl+C (os.Exit won't run defers).
@@ -213,7 +214,9 @@ var configSetKeys = []goprompt.Suggest{
 	{Text: "model", Description: "Global model for both agents"},
 	{Text: "model.alpha", Description: "Override model for Agent Alpha"},
 	{Text: "model.beta", Description: "Override model for Agent Beta"},
-	{Text: "backend", Description: "Agent backend (e.g. claude)"},
+	{Text: "backend", Description: "Default backend (claude, codex)"},
+	{Text: "backend.alpha", Description: "Override backend for Agent Alpha"},
+	{Text: "backend.beta", Description: "Override backend for Agent Beta"},
 	{Text: "max-turns", Description: "Maximum agent turns (integer)"},
 	{Text: "instructions", Description: "Path to instructions markdown file"},
 }
@@ -291,7 +294,7 @@ func handleConfigCommand(args string, workDir string, cfg *config.Config) {
 
 	switch {
 	case args == "":
-		ui.ShowConfig(workDir, cfg.AgentBackend, cfg.Model, cfg.ModelAlpha, cfg.ModelBeta, cfg.MaxTurns)
+		ui.ShowConfig(workDir, *cfg)
 
 	case strings.HasPrefix(args, "set "):
 		handleConfigSet(strings.TrimPrefix(args, "set "), workDir, cfg)
@@ -342,7 +345,7 @@ func handleConfigSet(kv string, workDir string, cfg *config.Config) {
 			promptAndSave(workDir, *cfg)
 			return
 		}
-		setModelValidated("Global model", value, func() {
+		setModelValidated(cfg.AgentBackend, "Global model", value, func() {
 			cfg.Model = value
 			ui.ConfigSet(key, value)
 			promptAndSave(workDir, *cfg)
@@ -355,7 +358,7 @@ func handleConfigSet(kv string, workDir string, cfg *config.Config) {
 			promptAndSave(workDir, *cfg)
 			return
 		}
-		setModelValidated("Agent Alpha", value, func() {
+		setModelValidated(cfg.BackendFor("alpha"), "Agent Alpha", value, func() {
 			cfg.ModelAlpha = value
 			ui.ConfigSet(key, value)
 			promptAndSave(workDir, *cfg)
@@ -368,7 +371,7 @@ func handleConfigSet(kv string, workDir string, cfg *config.Config) {
 			promptAndSave(workDir, *cfg)
 			return
 		}
-		setModelValidated("Agent Beta", value, func() {
+		setModelValidated(cfg.BackendFor("beta"), "Agent Beta", value, func() {
 			cfg.ModelBeta = value
 			ui.ConfigSet(key, value)
 			promptAndSave(workDir, *cfg)
@@ -376,6 +379,16 @@ func handleConfigSet(kv string, workDir string, cfg *config.Config) {
 
 	case "backend":
 		cfg.AgentBackend = value
+		ui.ConfigSet(key, value)
+		promptAndSave(workDir, *cfg)
+
+	case "backend.alpha":
+		cfg.BackendAlpha = value
+		ui.ConfigSet(key, value)
+		promptAndSave(workDir, *cfg)
+
+	case "backend.beta":
+		cfg.BackendBeta = value
 		ui.ConfigSet(key, value)
 		promptAndSave(workDir, *cfg)
 
@@ -424,7 +437,7 @@ func handleModelCommand(args string, workDir string, cfg *config.Config) {
 			promptAndSave(workDir, *cfg)
 			return
 		}
-		setModelValidated("Agent Alpha", value, func() {
+		setModelValidated(cfg.BackendFor("alpha"), "Agent Alpha", value, func() {
 			cfg.ModelAlpha = value
 			ui.ModelChangedFor("Agent Alpha", value)
 			promptAndSave(workDir, *cfg)
@@ -442,7 +455,7 @@ func handleModelCommand(args string, workDir string, cfg *config.Config) {
 			promptAndSave(workDir, *cfg)
 			return
 		}
-		setModelValidated("Agent Beta", value, func() {
+		setModelValidated(cfg.BackendFor("beta"), "Agent Beta", value, func() {
 			cfg.ModelBeta = value
 			ui.ModelChangedFor("Agent Beta", value)
 			promptAndSave(workDir, *cfg)
@@ -460,7 +473,7 @@ func handleModelCommand(args string, workDir string, cfg *config.Config) {
 			promptAndSave(workDir, *cfg)
 			return
 		}
-		setModelValidated("Global model", first, func() {
+		setModelValidated(cfg.AgentBackend, "Global model", first, func() {
 			cfg.Model = first
 			ui.ModelChanged(first)
 			promptAndSave(workDir, *cfg)
@@ -511,13 +524,18 @@ func promptAndSave(workDir string, cfg config.Config) {
 	ui.ConfigSaved(target)
 }
 
-// setModelValidated runs ValidateModel for newValue with a spinner.
-// On success, invokes onSuccess (which commits the config change).
-// On failure, shows a validation error and does NOT call onSuccess.
-func setModelValidated(target, newValue string, onSuccess func()) {
+// setModelValidated runs ValidateModel for newValue with a spinner, dispatching
+// to the correct backend validator. On failure, shows an error and does NOT
+// call onSuccess.
+func setModelValidated(backend, target, newValue string, onSuccess func()) {
 	var vErr error
 	_ = ui.RunWithSpinner(fmt.Sprintf("Validating %s...", newValue), func() error {
-		vErr = claudeagent.ValidateModel(context.Background(), newValue)
+		switch backend {
+		case "codex":
+			vErr = codexagent.ValidateModel(context.Background(), newValue)
+		default: // "claude" or empty
+			vErr = claudeagent.ValidateModel(context.Background(), newValue)
+		}
 		return nil
 	})
 	if vErr != nil {
@@ -536,6 +554,8 @@ func runTask(workDir string, cfg config.Config, prompt string) (string, error) {
 		InstructionsFile: cfg.InstructionsFile,
 		MaxTurns:         cfg.MaxTurns,
 		AgentBackend:     cfg.AgentBackend,
+		BackendAlpha:     cfg.BackendAlpha,
+		BackendBeta:      cfg.BackendBeta,
 		Model:            cfg.Model,
 		ModelAlpha:       cfg.ModelAlpha,
 		ModelBeta:        cfg.ModelBeta,
@@ -554,6 +574,8 @@ func resumeTask(workDir string, cfg config.Config, taskDir string) (string, erro
 		InstructionsFile: cfg.InstructionsFile,
 		MaxTurns:         cfg.MaxTurns,
 		AgentBackend:     cfg.AgentBackend,
+		BackendAlpha:     cfg.BackendAlpha,
+		BackendBeta:      cfg.BackendBeta,
 		Model:            cfg.Model,
 		ModelAlpha:       cfg.ModelAlpha,
 		ModelBeta:        cfg.ModelBeta,
