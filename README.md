@@ -1,4 +1,4 @@
-# departai
+# DepartAI
 
 AI agent orchestrator CLI that runs two AI coding agents in sequential relay turns on a shared task. Each agent can use a **different backend and model** — e.g. Alpha on Claude opus, Beta on Codex. Agents hand off context through a shared task log, critically review each other's work, and only stop when both independently agree the task is complete.
 
