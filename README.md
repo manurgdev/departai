@@ -180,6 +180,7 @@ All commands use the `/` prefix with hierarchical autocomplete.
 | `backend.beta` | `/config set backend.beta codex` | Override backend for Agent Beta |
 | `max-turns` | `/config set max-turns 20` | Max turns per run (0 = unlimited) |
 | `instructions` | `/config set instructions ./rules.md` | Custom instructions file |
+| `blocked-commands` | `/config set blocked-commands "WebFetch,rm -rf"` | Comma-separated list of tools/patterns agents must NOT use (soft enforcement) |
 
 ### Model validation
 
@@ -224,6 +225,32 @@ model_beta: gpt-5.3-codex       # each agent can use its backend's models
 
 # instructions_file: ./my-instructions.md
 ```
+
+## Security — restricting commands
+
+Agents run with full permissions and can use any tool the backend exposes (filesystem, shell, web, MCPs, etc.). For sensitive projects you can configure a blocklist of commands or tools that agents must NOT use.
+
+```yaml
+# .departai/config.yml
+blocked_commands:
+  - WebFetch              # block a whole tool
+  - WebSearch
+  - "rm -rf"              # block a shell pattern
+  - "git push --force"
+```
+
+Or from the REPL:
+
+```
+departai> /config set blocked-commands "WebFetch,rm -rf,git push --force"
+  ✓ blocked-commands set to 3 commands
+```
+
+When the blocklist is non-empty, departai injects a "Forbidden Commands" section into every turn's prompt instructing agents to refuse and stop if the task seems to require any of them. The second agent's review pass catches violations in the first agent's work.
+
+> **This is soft enforcement.** The agent reads the instruction and is expected to comply. It is not a sandbox or syscall-level restriction. For hard isolation, run departai inside a container or use the host OS's permission system.
+
+Global + project blocklists are **union-merged**: a project cannot un-block what's blocked globally. The merged list shows up in the banner as `Blocked : N command(s)` and in `/config` output.
 
 ## Agent Protocol
 

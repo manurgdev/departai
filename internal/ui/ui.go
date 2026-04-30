@@ -185,6 +185,9 @@ func WelcomeBanner(workDir string, cfg config.Config) {
 	if cfg.InstructionsFile != "" {
 		faint.Printf("  Instructions : %s\n", cfg.InstructionsFile)
 	}
+	if n := len(cfg.BlockedCommands); n > 0 {
+		faint.Printf("  Blocked      : %d command(s)\n", n)
+	}
 	fmt.Println()
 	faint.Println("  Agents:")
 	faint.Printf("    Alpha : %s / %s\n", cfg.BackendFor("alpha"), modelDisplay(cfg.ModelFor("alpha")))
@@ -228,7 +231,13 @@ func InteractiveHelp() {
 	fmt.Println("    claude (default), codex")
 	fmt.Println()
 	bold.Println("  Config keys:")
-	fmt.Println("    model, model.alpha, model.beta, backend, max-turns, instructions")
+	fmt.Println("    model, model.alpha, model.beta")
+	fmt.Println("    backend, backend.alpha, backend.beta")
+	fmt.Println("    max-turns, instructions, blocked-commands")
+	fmt.Println()
+	bold.Println("  Security:")
+	fmt.Println("    /config set blocked-commands \"WebFetch,rm -rf\"")
+	fmt.Println("    Comma-separated tools/patterns agents must NOT use (soft enforcement).")
 	fmt.Println()
 	bold.Println("  Task control:")
 	fmt.Println("    Press ESC during a running task to pause it.")
@@ -338,10 +347,22 @@ func ShowConfig(workDir string, cfg config.Config) {
 	bold.Println("  Current configuration:")
 	fmt.Printf("    Work dir     : %s\n", workDir)
 	fmt.Printf("    Max turns    : %s\n", maxTurnsDisplay(cfg.MaxTurns))
+	if cfg.InstructionsFile != "" {
+		fmt.Printf("    Instructions : %s\n", cfg.InstructionsFile)
+	}
 	fmt.Println()
 	fmt.Println("    Agents:")
 	fmt.Printf("      Alpha : %s / %s\n", cfg.BackendFor("alpha"), modelDisplay(cfg.ModelFor("alpha")))
 	fmt.Printf("      Beta  : %s / %s\n", cfg.BackendFor("beta"), modelDisplay(cfg.ModelFor("beta")))
+	fmt.Println()
+	fmt.Println("    Blocked commands:")
+	if len(cfg.BlockedCommands) == 0 {
+		faint.Println("      (none)")
+	} else {
+		for _, c := range cfg.BlockedCommands {
+			fmt.Printf("      - %s\n", c)
+		}
+	}
 	fmt.Println()
 }
 

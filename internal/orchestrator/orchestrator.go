@@ -196,6 +196,10 @@ type Config struct {
 	Model            string // default model for all agents (optional)
 	ModelAlpha       string // override for Agent Alpha (optional)
 	ModelBeta        string // override for Agent Beta (optional)
+
+	// BlockedCommands is the merged blocklist of tools/commands the agent
+	// must not use. Injected as a "Forbidden Commands" section in the prompt.
+	BlockedCommands []string
 }
 
 // Orchestrator manages the sequential agent relay until consensus or max turns.
@@ -507,6 +511,18 @@ func (o *Orchestrator) buildPrompt(turnNumber int, agentName string) (string, er
 		b.WriteString("## Project Rules\n\n")
 		b.WriteString(projectRules)
 		b.WriteString("\n\n")
+	}
+
+	if len(o.cfg.BlockedCommands) > 0 {
+		b.WriteString("## Forbidden Commands\n\n")
+		b.WriteString("You are NOT allowed to use the following commands or tools during this turn:\n\n")
+		for _, c := range o.cfg.BlockedCommands {
+			fmt.Fprintf(&b, "- %s\n", c)
+		}
+		b.WriteString("\nIf the task appears to require any of them, STOP and explain in your turn ")
+		b.WriteString("summary why you cannot proceed. Do not attempt workarounds (different shell, ")
+		b.WriteString("escaped variants, alternative tools that achieve the same effect). Mark ")
+		b.WriteString("**Complete: no** and let the human decide whether to relax the restriction.\n\n")
 	}
 
 	b.WriteString("## Task Log\n\n")

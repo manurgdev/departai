@@ -51,6 +51,15 @@ Pending work compiled from the conversation history, categorized by theme. Not s
 - [ ] **codex package tests** — stream parsing, command unwrapping, ValidateModel (skip if codex CLI unavailable).
 - [ ] **End-to-end smoke test** — spin up a fake backend, verify full turn flow.
 
+## Security — hard enforcement of blocklist
+
+The current `blocked_commands` config is **soft enforcement** (prompt-injected). Future hard enforcement options:
+
+- [ ] **Translate to claude `--disallowedTools`** — when the active backend is claude, also pass the blocklist via the native CLI flag for hard enforcement.
+- [ ] **Codex stream-watching** — for codex (no native flag), parse the live stream and kill the agent if a blocked tool/command appears mid-turn. Best-effort but better than prompt-only.
+- [ ] **Sandboxed execution** — run agents inside a container or with restricted filesystem/network access for true isolation.
+- [ ] **Audit log** — record which commands the agent attempted vs which were blocked.
+
 ## Polish / reliability
 
 - [ ] **Graceful handling of corrupt task log** — if the markdown is malformed, recover (skip bad entries, show warning) instead of crashing.

@@ -22,6 +22,11 @@ type Config struct {
 	ModelAlpha       string `yaml:"model_alpha,omitempty"`        // override for Agent Alpha
 	ModelBeta        string `yaml:"model_beta,omitempty"`         // override for Agent Beta
 	InstructionsFile string `yaml:"instructions_file"`
+
+	// BlockedCommands lists tool names or shell command patterns that agents
+	// must NOT use during a turn (e.g. "WebFetch", "rm -rf"). Soft enforcement
+	// via prompt injection — agents are instructed to refuse and stop.
+	BlockedCommands []string `yaml:"blocked_commands,omitempty"`
 }
 
 // BackendFor returns the backend to use for the given agent name, preferring
@@ -207,5 +212,18 @@ func merge(dst *Config, src Config) {
 	}
 	if src.InstructionsFile != "" {
 		dst.InstructionsFile = src.InstructionsFile
+	}
+	if len(src.BlockedCommands) > 0 {
+		// Union merge: combine both lists, preserving order, deduplicated.
+		seen := make(map[string]bool, len(dst.BlockedCommands))
+		for _, c := range dst.BlockedCommands {
+			seen[c] = true
+		}
+		for _, c := range src.BlockedCommands {
+			if !seen[c] {
+				dst.BlockedCommands = append(dst.BlockedCommands, c)
+				seen[c] = true
+			}
+		}
 	}
 }

@@ -219,6 +219,7 @@ var configSetKeys = []goprompt.Suggest{
 	{Text: "backend.beta", Description: "Override backend for Agent Beta"},
 	{Text: "max-turns", Description: "Maximum agent turns (integer)"},
 	{Text: "instructions", Description: "Path to instructions markdown file"},
+	{Text: "blocked-commands", Description: "Comma-separated tools/commands agents must NOT use"},
 }
 
 // Targets for "/config save <target>".
@@ -330,7 +331,7 @@ func handleConfigSet(kv string, workDir string, cfg *config.Config) {
 	parts := strings.SplitN(strings.TrimSpace(kv), " ", 2)
 	if len(parts) < 2 || parts[1] == "" {
 		ui.ConfigSetError("usage: /config set <key> <value>")
-		ui.ConfigSetError("keys: model, model.alpha, model.beta, backend, max-turns, instructions")
+		ui.ConfigSetError("keys: model, model.alpha, model.beta, backend, backend.alpha, backend.beta, max-turns, instructions, blocked-commands")
 		return
 	}
 
@@ -407,8 +408,27 @@ func handleConfigSet(kv string, workDir string, cfg *config.Config) {
 		ui.ConfigSet(key, value)
 		promptAndSave(workDir, *cfg)
 
+	case "blocked-commands":
+		if isUnsetValue(value) {
+			cfg.BlockedCommands = nil
+			ui.ConfigSet(key, "(none)")
+			promptAndSave(workDir, *cfg)
+			return
+		}
+		// Comma-separated input → trimmed slice without empties.
+		parts := strings.Split(value, ",")
+		var list []string
+		for _, p := range parts {
+			if t := strings.TrimSpace(p); t != "" {
+				list = append(list, t)
+			}
+		}
+		cfg.BlockedCommands = list
+		ui.ConfigSet(key, fmt.Sprintf("%d commands", len(list)))
+		promptAndSave(workDir, *cfg)
+
 	default:
-		ui.ConfigSetError(fmt.Sprintf("unknown key %q (valid: model, model.alpha, model.beta, backend, max-turns, instructions)", key))
+		ui.ConfigSetError(fmt.Sprintf("unknown key %q (valid: model, model.alpha, model.beta, backend, backend.alpha, backend.beta, max-turns, instructions, blocked-commands)", key))
 	}
 }
 
@@ -559,6 +579,7 @@ func runTask(workDir string, cfg config.Config, prompt string) (string, error) {
 		Model:            cfg.Model,
 		ModelAlpha:       cfg.ModelAlpha,
 		ModelBeta:        cfg.ModelBeta,
+		BlockedCommands:  cfg.BlockedCommands,
 	})
 	if err != nil {
 		return "", fmt.Errorf("initialising orchestrator: %w", err)
@@ -579,6 +600,7 @@ func resumeTask(workDir string, cfg config.Config, taskDir string) (string, erro
 		Model:            cfg.Model,
 		ModelAlpha:       cfg.ModelAlpha,
 		ModelBeta:        cfg.ModelBeta,
+		BlockedCommands:  cfg.BlockedCommands,
 	}, taskDir)
 	if err != nil {
 		return taskDir, fmt.Errorf("resuming task: %w", err)
