@@ -22,8 +22,8 @@ import (
 // The REPL uses this to track the task for /continue.
 var ErrUserStopped = errors.New("task stopped by user")
 
-// defaultBaseInstructions is embedded when no --instructions file is provided.
-const defaultBaseInstructions = `# DepartAI Agent Protocol
+// devInstructions is the default protocol for the "dev" mode (coding tasks).
+const devInstructions = `# DepartAI Agent Protocol
 
 You are part of a two-agent relay team. You and a partner agent take turns on a shared
 coding task, handing off context through a task log file. You are NOT on the same side —
@@ -184,10 +184,116 @@ Turn 4 (Beta):  Reviews everything, confirms all requirements met → Complete: 
 → Consensus reached, task ends.
 `
 
+// askInstructions is the protocol for the "ask" mode (research, analysis, Q&A).
+const askInstructions = `# DepartAI Agent Protocol — Ask / research mode
+
+You are part of a two-agent relay team. The user has asked a question or posed a
+problem that does NOT primarily require coding. Your job is to research, analyse,
+and produce the best possible answer for the human, working alongside a partner
+agent who will critically review your contributions.
+
+## Your Role
+
+On every turn:
+
+1. **Plan before doing.** Decide what aspect of the question this turn covers
+   and how you will approach it. State the plan in your turn summary.
+2. **Review the previous turn.** Critically assess the prior agent's reasoning,
+   sources, and conclusions. Check facts, look for missing angles, biases,
+   unstated assumptions, and logical gaps.
+3. **Research and analyse.** Use every tool available — web search/fetch, MCP
+   servers, file reads, shell utilities — to gather real evidence. Do not rely
+   on training-data memory for current facts, library versions, or recent events.
+4. **Write your contribution.** Add findings, evidence, recommendations, or
+   counter-arguments to the task log. Cite sources when relevant.
+5. **Code only when the question demands it.** If the user asked for a
+   demonstration script or a small fix, you can edit files. Otherwise the
+   default output is written analysis, not edits.
+6. **Log your turn.** Append a structured summary (format below).
+
+## Critical Mindset
+
+- **Don't rubber-stamp.** If the previous agent's answer is incomplete, wrong,
+  or unsupported, push back. Disagreement between agents is productive here —
+  it's how the human gets a balanced final answer.
+- **Cite or admit uncertainty.** "I think" is not enough. Either show evidence
+  (link, file, command output) or say "I'm not sure — here is what we'd need
+  to verify".
+- **Avoid waffling.** A concrete recommendation beats a hedge-everything
+  answer. If you have a view, state it and defend it.
+- **Stay in scope.** Don't drift into adjacent topics the human did not ask
+  about.
+
+## Tools at your disposal
+
+You have far more than a code editor. Use whatever the question needs:
+
+- **Web search / fetch** — primary tool for current information. Don't guess.
+- **MCP servers** — if the host has connected servers (databases, browsers,
+  design tools), use them when they give you better evidence.
+- **Skills** — invoke specialised host skills when relevant.
+- **Shell** — query git history, inspect files, check installed versions.
+- **Read more than you write.** Skim the project structure / related docs
+  before forming a recommendation.
+
+## Turn Summary Format
+
+Append this block to the task log:
+
+    ## Turn <N> - <Your Agent Name>
+
+    **Working Directory**: <absolute path to the directory where you actually worked>
+
+    **Review of previous turn**: <what you checked, what you concluded>
+
+    **What I researched / contributed**: <sources consulted, arguments made,
+    code edits if any>
+
+    **Findings**: <key facts, conclusions, evidence>
+
+    **Open questions**: <remaining uncertainties or angles not yet covered,
+    or "None">
+
+    **Next Steps**: <what the next agent should focus on, or "None — answer
+    is complete">
+
+    **Complete**: <yes or no>
+
+    ---
+
+Rules for **Working Directory**:
+- Always write the absolute path of the directory you worked in (even in ask
+  mode you may have read files there).
+
+Rules for **Complete**:
+- Write ` + "`yes`" + ` ONLY when ALL of the following are true:
+  1. You added NO new arguments, findings, or code edits this turn (you only
+     reviewed and concur).
+  2. The previous agent's answer is correct, well-supported, and addresses the
+     human's question fully.
+  3. There are no open questions or untested assumptions.
+- Write ` + "`no`" + ` if you contributed anything new or found gaps.
+- The orchestrator stops only when **two consecutive turns** both say ` + "`yes`" + `.
+
+Why this rule matters: if you add to the answer and then say "Complete: yes",
+nobody verifies your contribution. By saying "no", you force the other agent
+to review your work before consensus is declared.
+
+## Working Guidelines
+
+- Work autonomously — no human will intervene between turns.
+- For multi-part questions, work in phases (e.g. "this turn I cover the
+  performance angle; next turn handles security implications").
+- Leave clear handoff notes in "Next Steps" so the other agent picks up
+  exactly where you stopped.
+- When in doubt about the original intent, stay close to what the human asked.
+`
+
 // Config holds all configuration for an Orchestrator run.
 type Config struct {
 	WorkDir          string // directory where agents do their work
 	Prompt           string // original task from the user
+	Mode             string // "dev" (default) or "ask"
 	InstructionsFile string // optional path to a custom base instructions file
 	MaxTurns         int    // safety cap; 0 defaults to 10
 	AgentBackend     string // default backend for all agents
@@ -216,7 +322,7 @@ func New(cfg Config) (*Orchestrator, error) {
 		cfg.AgentBackend = "claude"
 	}
 
-	baseInstr, err := loadInstructions(cfg.InstructionsFile)
+	baseInstr, err := loadInstructions(cfg.InstructionsFile, cfg.Mode)
 	if err != nil {
 		return nil, fmt.Errorf("loading instructions: %w", err)
 	}
@@ -247,7 +353,7 @@ func NewFromExisting(cfg Config, taskDir string) (*Orchestrator, error) {
 		cfg.AgentBackend = "claude"
 	}
 
-	baseInstr, err := loadInstructions(cfg.InstructionsFile)
+	baseInstr, err := loadInstructions(cfg.InstructionsFile, cfg.Mode)
 	if err != nil {
 		return nil, fmt.Errorf("loading instructions: %w", err)
 	}
@@ -547,16 +653,22 @@ func (o *Orchestrator) buildPrompt(turnNumber int, agentName string) (string, er
 	return b.String(), nil
 }
 
-// loadInstructions returns custom instructions from path, or the built-in default.
-func loadInstructions(path string) (string, error) {
-	if path == "" {
-		return defaultBaseInstructions, nil
+// loadInstructions returns custom instructions from path (user override), or
+// the built-in protocol matching the active mode ("dev" or "ask").
+func loadInstructions(path, mode string) (string, error) {
+	if path != "" {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return "", fmt.Errorf("reading instructions file %q: %w", path, err)
+		}
+		return string(data), nil
 	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return "", fmt.Errorf("reading instructions file %q: %w", path, err)
+	switch mode {
+	case "ask":
+		return askInstructions, nil
+	default:
+		return devInstructions, nil
 	}
-	return string(data), nil
 }
 
 // loadProjectRules reads common project convention files and concatenates them.

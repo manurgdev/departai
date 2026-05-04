@@ -161,6 +161,13 @@ func TaskCleared() {
 	fmt.Println()
 }
 
+// ModeChanged confirms a switch between /dev and /ask, and reminds the user
+// how to persist the change (the /dev and /ask shortcuts are session-only).
+func ModeChanged(mode string) {
+	boldGreen.Printf("  ✓ Mode set to %s ", mode)
+	faint.Printf("(session only — use /config set mode %s to persist)\n", mode)
+}
+
 // Warning prints a non-fatal warning line.
 func Warning(msg string) {
 	boldYellow.Printf("  ⚠  %s\n", msg)
@@ -181,6 +188,7 @@ func WelcomeBanner(workDir string, cfg config.Config) {
 	boldCyan.Println("  DepartAI — AI Agent Orchestrator")
 	fmt.Println()
 	faint.Printf("  Work dir     : %s\n", workDir)
+	faint.Printf("  Mode         : %s\n", modeDisplay(cfg.Mode))
 	faint.Printf("  Max turns    : %s\n", maxTurnsDisplay(cfg.MaxTurns))
 	if cfg.InstructionsFile != "" {
 		faint.Printf("  Instructions : %s\n", cfg.InstructionsFile)
@@ -211,6 +219,8 @@ func InteractiveHelp() {
 	fmt.Println()
 	bold.Println("  Commands:")
 	fmt.Println("    /help                        Show this help message")
+	fmt.Println("    /dev                         Switch to development mode (code-focused)")
+	fmt.Println("    /ask                         Switch to ask mode (research / Q&A)")
 	fmt.Println("    /config                      Show current configuration")
 	fmt.Println("    /config set <key> <value>    Set a config value (prompts to save)")
 	fmt.Println("    /config save                 Save config directly to project .departai/config.yml")
@@ -233,7 +243,7 @@ func InteractiveHelp() {
 	bold.Println("  Config keys:")
 	fmt.Println("    model, model.alpha, model.beta")
 	fmt.Println("    backend, backend.alpha, backend.beta")
-	fmt.Println("    max-turns, instructions, blocked-commands")
+	fmt.Println("    mode, max-turns, instructions, blocked-commands")
 	fmt.Println()
 	bold.Println("  Security:")
 	fmt.Println("    /config set blocked-commands \"WebFetch,rm -rf\"")
@@ -291,6 +301,13 @@ func ModelUnset(target, hint string) {
 }
 
 // modelDisplay returns the model name or "(default)" for empty values.
+func modeDisplay(mode string) string {
+	if mode == "" {
+		return "dev"
+	}
+	return mode
+}
+
 func maxTurnsDisplay(n int) string {
 	if n <= 0 {
 		return "unlimited"
@@ -346,6 +363,7 @@ func ShowConfig(workDir string, cfg config.Config) {
 	fmt.Println()
 	bold.Println("  Current configuration:")
 	fmt.Printf("    Work dir     : %s\n", workDir)
+	fmt.Printf("    Mode         : %s\n", modeDisplay(cfg.Mode))
 	fmt.Printf("    Max turns    : %s\n", maxTurnsDisplay(cfg.MaxTurns))
 	if cfg.InstructionsFile != "" {
 		fmt.Printf("    Instructions : %s\n", cfg.InstructionsFile)

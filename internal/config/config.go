@@ -14,6 +14,7 @@ import (
 // Config holds all user-configurable departai settings.
 // Fields map 1:1 to YAML keys and CLI flags.
 type Config struct {
+	Mode             string `yaml:"mode,omitempty"`               // "dev" (default) or "ask"
 	AgentBackend     string `yaml:"agent_backend"`                // default backend for all agents
 	BackendAlpha     string `yaml:"backend_alpha,omitempty"`      // override for Agent Alpha
 	BackendBeta      string `yaml:"backend_beta,omitempty"`       // override for Agent Beta
@@ -68,6 +69,7 @@ func (c Config) ModelFor(agentName string) string {
 // Defaults returns the built-in baseline configuration.
 func Defaults() Config {
 	return Config{
+		Mode:         "dev",
 		AgentBackend: "claude",
 		MaxTurns:     0, // 0 = unlimited turns (run until consensus)
 	}
@@ -189,6 +191,9 @@ func loadFile(path string, dst *Config) error {
 
 // merge overlays non-zero fields from src onto dst.
 func merge(dst *Config, src Config) {
+	if src.Mode != "" {
+		dst.Mode = src.Mode
+	}
 	if src.AgentBackend != "" {
 		dst.AgentBackend = src.AgentBackend
 	}

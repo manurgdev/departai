@@ -74,6 +74,14 @@ func runInteractive(workDir string, cfg config.Config) error {
 		case line == "/help":
 			ui.InteractiveHelp()
 
+		case line == "/dev":
+			cfgPtr.Mode = "dev"
+			ui.ModeChanged("dev")
+
+		case line == "/ask":
+			cfgPtr.Mode = "ask"
+			ui.ModeChanged("ask")
+
 		case line == "/continue":
 			if currentTaskDir == "" {
 				ui.NoActiveTask()
@@ -139,14 +147,18 @@ func runInteractive(workDir string, cfg config.Config) error {
 		executor,
 		completer,
 		goprompt.OptionLivePrefix(func() (string, bool) {
+			mode := cfgPtr.Mode
+			if mode == "" {
+				mode = "dev"
+			}
 			if currentTaskDir != "" {
 				short := filepath.Base(currentTaskDir)
 				if len(short) > 25 {
 					short = short[:22] + "..."
 				}
-				return fmt.Sprintf("departai [%s]> ", short), true
+				return fmt.Sprintf("departai (%s) [%s]> ", mode, short), true
 			}
-			return "departai> ", true
+			return fmt.Sprintf("departai (%s)> ", mode), true
 		}),
 		goprompt.OptionPrefixTextColor(goprompt.Cyan),
 		goprompt.OptionPreviewSuggestionTextColor(goprompt.DarkGray),
@@ -189,6 +201,8 @@ func gracefulExit(restore func()) goprompt.KeyBindFunc {
 // Top-level slash commands.
 var topLevelCommands = []goprompt.Suggest{
 	{Text: "/help", Description: "Show available commands"},
+	{Text: "/dev", Description: "Switch to development mode (code-focused)"},
+	{Text: "/ask", Description: "Switch to ask mode (research / Q&A)"},
 	{Text: "/config", Description: "Show current configuration"},
 	{Text: "/config set", Description: "Set a config value"},
 	{Text: "/config save", Description: "Save config to file"},
@@ -219,6 +233,7 @@ var configSetKeys = []goprompt.Suggest{
 	{Text: "backend.beta", Description: "Override backend for Agent Beta"},
 	{Text: "max-turns", Description: "Maximum agent turns (integer)"},
 	{Text: "instructions", Description: "Path to instructions markdown file"},
+	{Text: "mode", Description: "Active mode: dev or ask"},
 	{Text: "blocked-commands", Description: "Comma-separated tools/commands agents must NOT use"},
 }
 
@@ -331,7 +346,7 @@ func handleConfigSet(kv string, workDir string, cfg *config.Config) {
 	parts := strings.SplitN(strings.TrimSpace(kv), " ", 2)
 	if len(parts) < 2 || parts[1] == "" {
 		ui.ConfigSetError("usage: /config set <key> <value>")
-		ui.ConfigSetError("keys: model, model.alpha, model.beta, backend, backend.alpha, backend.beta, max-turns, instructions, blocked-commands")
+		ui.ConfigSetError("keys: model, model.alpha, model.beta, backend, backend.alpha, backend.beta, mode, max-turns, instructions, blocked-commands")
 		return
 	}
 
@@ -408,6 +423,16 @@ func handleConfigSet(kv string, workDir string, cfg *config.Config) {
 		ui.ConfigSet(key, value)
 		promptAndSave(workDir, *cfg)
 
+	case "mode":
+		v := strings.ToLower(strings.TrimSpace(value))
+		if v != "dev" && v != "ask" {
+			ui.ConfigSetError(`mode must be "dev" or "ask"`)
+			return
+		}
+		cfg.Mode = v
+		ui.ConfigSet(key, v)
+		promptAndSave(workDir, *cfg)
+
 	case "blocked-commands":
 		if isUnsetValue(value) {
 			cfg.BlockedCommands = nil
@@ -428,7 +453,7 @@ func handleConfigSet(kv string, workDir string, cfg *config.Config) {
 		promptAndSave(workDir, *cfg)
 
 	default:
-		ui.ConfigSetError(fmt.Sprintf("unknown key %q (valid: model, model.alpha, model.beta, backend, backend.alpha, backend.beta, max-turns, instructions, blocked-commands)", key))
+		ui.ConfigSetError(fmt.Sprintf("unknown key %q (valid: model, model.alpha, model.beta, backend, backend.alpha, backend.beta, mode, max-turns, instructions, blocked-commands)", key))
 	}
 }
 
@@ -571,6 +596,7 @@ func runTask(workDir string, cfg config.Config, prompt string) (string, error) {
 	orch, err := orchestrator.New(orchestrator.Config{
 		WorkDir:          workDir,
 		Prompt:           prompt,
+		Mode:             cfg.Mode,
 		InstructionsFile: cfg.InstructionsFile,
 		MaxTurns:         cfg.MaxTurns,
 		AgentBackend:     cfg.AgentBackend,
@@ -592,6 +618,7 @@ func runTask(workDir string, cfg config.Config, prompt string) (string, error) {
 func resumeTask(workDir string, cfg config.Config, taskDir string) (string, error) {
 	orch, err := orchestrator.NewFromExisting(orchestrator.Config{
 		WorkDir:          workDir,
+		Mode:             cfg.Mode,
 		InstructionsFile: cfg.InstructionsFile,
 		MaxTurns:         cfg.MaxTurns,
 		AgentBackend:     cfg.AgentBackend,

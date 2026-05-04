@@ -152,6 +152,8 @@ All commands use the `/` prefix with hierarchical autocomplete.
 | Command | Description |
 |---------|-------------|
 | `/help` | Show all available commands |
+| `/dev` | Switch to development mode (code-focused) |
+| `/ask` | Switch to ask mode (research / Q&A) |
 | `/config` | Show current configuration |
 | `/config set <key> <value>` | Set a config value (validates models, prompts to save) |
 | `/config save` | Save config to project `.departai/config.yml` |
@@ -179,6 +181,7 @@ All commands use the `/` prefix with hierarchical autocomplete.
 | `backend.alpha` | `/config set backend.alpha claude` | Override backend for Agent Alpha |
 | `backend.beta` | `/config set backend.beta codex` | Override backend for Agent Beta |
 | `max-turns` | `/config set max-turns 20` | Max turns per run (0 = unlimited) |
+| `mode` | `/config set mode ask` | Active mode: `dev` (default) or `ask` |
 | `instructions` | `/config set instructions ./rules.md` | Custom instructions file |
 | `blocked-commands` | `/config set blocked-commands "WebFetch,rm -rf"` | Comma-separated list of tools/patterns agents must NOT use (soft enforcement) |
 
@@ -225,6 +228,37 @@ model_beta: gpt-5.3-codex       # each agent can use its backend's models
 
 # instructions_file: ./my-instructions.md
 ```
+
+## Modes — `/dev` and `/ask`
+
+departai supports two modes:
+
+- **`/dev`** (default) — coding tasks. Agents critically review each other, edit code, run tests, and only declare consensus when both made zero changes and verified the work.
+- **`/ask`** — research / Q&A / analysis tasks. Agents discuss, gather evidence, cite sources, and produce a written answer. They can edit code if the question demands it, but the default output is analysis, not edits.
+
+Switch from the REPL:
+
+```
+departai (dev)> /ask
+  ✓ Mode set to ask
+
+departai (ask)>
+```
+
+Or set explicitly:
+
+```yaml
+# .departai/config.yml
+mode: ask
+```
+
+The active mode is always visible:
+
+- In the **banner**: `Mode : ask`
+- In the **REPL prompt**: `departai (ask)>` or `departai (ask) [task-id]>`
+- In **`/config`** output
+
+Each mode has its own built-in agent protocol. The dev mode emphasises code-edit cycles + tests; the ask mode emphasises evidence-based reasoning, citing sources, and answering precisely. Both share the same two-agent relay and consensus rule.
 
 ## Security — restricting commands
 

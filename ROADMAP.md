@@ -16,6 +16,16 @@ Pending work compiled from the conversation history, categorized by theme. Not s
 - [ ] **Persist `currentTaskDir` across sessions** — remember the last active task when departai restarts (state in `~/.departai/state.yml` or similar).
 - [ ] **Multi-project task view** — see tasks from all projects, not just the current working dir (e.g. `/resume --all`).
 
+## Modes
+
+Today: `/dev` (default, code-focused) and `/ask` (research / Q&A) — see README.
+
+Possible future modes (each with its own protocol):
+- [ ] **`/security`** — agents focused on threat modelling, code review for vulnerabilities, fixes with minimal blast radius.
+- [ ] **`/docs`** — agents collaborate on technical writing: structure first, then prose, then review for clarity/accuracy.
+- [ ] **`/refactor`** — pure refactoring sessions: behaviour-preserving changes only, with strict test verification at each step.
+- [ ] **Custom modes** — let the user define their own mode name + instructions file in config (`modes: { my-mode: ./instructions/my-mode.md }`).
+
 ## Agent protocol
 
 - [ ] **Per-turn timeout** — besides `max_turns`, add a per-turn wall-clock timeout (e.g. `max_turn_duration: 15m`) to prevent a single turn from hanging forever.
