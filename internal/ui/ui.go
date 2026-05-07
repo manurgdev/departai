@@ -140,6 +140,46 @@ func TaskStopped() {
 	fmt.Println()
 }
 
+// TurnTimeout prints a warning when a turn was forcibly killed for exceeding
+// the per-turn duration budget. The relay continues with the next agent.
+func TurnTimeout(agent string, duration time.Duration) {
+	fmt.Println()
+	boldYellow.Printf("  ⏱  %s exceeded the %s budget — killed by orchestrator\n", agent, duration)
+	faint.Println("     Partial activity preserved in this turn's raw log; relay continues with the next agent.")
+	fmt.Println()
+}
+
+// OscillationDetected prints the loop-detection banner when the orchestrator
+// concludes that the agents are stuck churning the same files without progress.
+// The user can inject a directive, /continue (to give the relay another K-turn
+// window), or abandon.
+func OscillationDetected(files []string, turns int) {
+	fmt.Println()
+	boldYellow.Printf("  🌀 Oscillation detected — relay stopped\n")
+	faint.Printf("     Last %d turns kept touching:\n", turns)
+	for _, f := range files {
+		faint.Printf("     - %s\n", f)
+	}
+	faint.Println("     Without new Acceptance Criteria being checked.")
+	fmt.Println()
+	faint.Println("  Type a directive to break the loop, or /continue to retry one more cycle.")
+	fmt.Println()
+}
+
+// AgentBlocked prints the human-escalation banner when an agent set the
+// **Blocked on** field in its turn summary. The reason is shown verbatim;
+// the user can answer with a directive or /continue to defer back.
+func AgentBlocked(agent, reason string) {
+	fmt.Println()
+	boldYellow.Printf("  🚧 %s is blocked\n", agent)
+	for _, line := range strings.Split(strings.TrimSpace(reason), "\n") {
+		faint.Printf("     %s\n", line)
+	}
+	fmt.Println()
+	faint.Println("  Type a directive to unblock, or /continue to tell agents to decide themselves.")
+	fmt.Println()
+}
+
 // NoActiveTask prints an error when /continue is used with no active task.
 func NoActiveTask() {
 	boldRed.Println("  No active task. Use /resume to pick a previous task, or type a new prompt.")
@@ -168,6 +208,25 @@ func ModeChanged(mode string) {
 	faint.Printf("(session only — use /config set mode %s to persist)\n", mode)
 }
 
+// RespecQueued confirms /respec was set: the next prompt or /continue will
+// trigger a fresh spec pre-turn loop before the regular relay.
+func RespecQueued() {
+	boldGreen.Println("  ✓ Spec re-evaluation queued")
+	faint.Println("    Next prompt (or /continue) will run the spec pre-turns first.")
+}
+
+// RespecAlreadyQueued is shown when /respec is invoked twice in a row.
+func RespecAlreadyQueued() {
+	faint.Println("  Spec re-evaluation already queued — type a prompt or /continue to trigger it.")
+}
+
+// RespecNoActiveTask hints that /respec has no effect when no task is active,
+// because new tasks already run the spec pre-turn loop by default.
+func RespecNoActiveTask() {
+	boldYellow.Println("  /respec has no effect with no active task.")
+	faint.Println("    Your next prompt will create a fresh task, which already runs the spec pre-turns.")
+}
+
 // Warning prints a non-fatal warning line.
 func Warning(msg string) {
 	boldYellow.Printf("  ⚠  %s\n", msg)
@@ -190,6 +249,8 @@ func WelcomeBanner(workDir string, cfg config.Config) {
 	faint.Printf("  Work dir     : %s\n", workDir)
 	faint.Printf("  Mode         : %s\n", modeDisplay(cfg.Mode))
 	faint.Printf("  Max turns    : %s\n", maxTurnsDisplay(cfg.MaxTurns))
+	faint.Printf("  Max turn time: %s\n", maxTurnDurationDisplay(cfg.MaxTurnDurationStr))
+	faint.Printf("  Log window   : %s\n", logWindowDisplay(cfg.LogWindow))
 	if cfg.InstructionsFile != "" {
 		faint.Printf("  Instructions : %s\n", cfg.InstructionsFile)
 	}
@@ -233,6 +294,7 @@ func InteractiveHelp() {
 	fmt.Println("    /model beta [<name>]         Show/set Agent Beta's model (prompts to save)")
 	fmt.Println("    /model beta unset            Clear Agent Beta's override (inherits global)")
 	fmt.Println("    /continue                    Continue the active task's relay loop")
+	fmt.Println("    /respec                      Force a spec pre-turn before the next prompt or /continue")
 	fmt.Println("    /resume                      Select a previous task (does not run it)")
 	fmt.Println("    /new                         Deselect current task (next prompt = new task)")
 	fmt.Println("    /exit, /quit                 Exit departai")
@@ -315,6 +377,20 @@ func maxTurnsDisplay(n int) string {
 	return fmt.Sprintf("%d", n)
 }
 
+func maxTurnDurationDisplay(s string) string {
+	if s == "" {
+		return "no limit"
+	}
+	return s
+}
+
+func logWindowDisplay(n int) string {
+	if n <= 0 {
+		return "unlimited"
+	}
+	return fmt.Sprintf("last %d turns", n)
+}
+
 func modelDisplay(model string) string {
 	if model == "" {
 		return "(default)"
@@ -365,6 +441,8 @@ func ShowConfig(workDir string, cfg config.Config) {
 	fmt.Printf("    Work dir     : %s\n", workDir)
 	fmt.Printf("    Mode         : %s\n", modeDisplay(cfg.Mode))
 	fmt.Printf("    Max turns    : %s\n", maxTurnsDisplay(cfg.MaxTurns))
+	fmt.Printf("    Max turn time: %s\n", maxTurnDurationDisplay(cfg.MaxTurnDurationStr))
+	fmt.Printf("    Log window   : %s\n", logWindowDisplay(cfg.LogWindow))
 	if cfg.InstructionsFile != "" {
 		fmt.Printf("    Instructions : %s\n", cfg.InstructionsFile)
 	}

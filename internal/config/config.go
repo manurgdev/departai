@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -19,6 +20,15 @@ type Config struct {
 	BackendAlpha     string `yaml:"backend_alpha,omitempty"`      // override for Agent Alpha
 	BackendBeta      string `yaml:"backend_beta,omitempty"`       // override for Agent Beta
 	MaxTurns         int    `yaml:"max_turns"`
+	// MaxTurnDuration is parsed from MaxTurnDurationStr — yaml.v3 does not
+	// support time.Duration natively, so we keep the source as a string and
+	// expose a typed helper.
+	MaxTurnDurationStr string `yaml:"max_turn_duration,omitempty"` // e.g. "15m", "1h30m"; empty = no limit
+	// LogWindow caps the number of turn entries injected into each prompt.
+	// 0 = unlimited (full task log); positive = inject only the last N turns
+	// (plus header, original task, and all user directives) with an omission
+	// marker covering the dropped range.
+	LogWindow int `yaml:"log_window,omitempty"`
 	Model            string `yaml:"model"`                        // default model for all agents
 	ModelAlpha       string `yaml:"model_alpha,omitempty"`        // override for Agent Alpha
 	ModelBeta        string `yaml:"model_beta,omitempty"`         // override for Agent Beta
@@ -47,6 +57,19 @@ func (c Config) BackendFor(agentName string) string {
 		return "claude"
 	}
 	return c.AgentBackend
+}
+
+// MaxTurnDuration parses MaxTurnDurationStr into a time.Duration.
+// Returns 0 (no limit) for an empty or unparseable value.
+func (c Config) MaxTurnDuration() time.Duration {
+	if c.MaxTurnDurationStr == "" {
+		return 0
+	}
+	d, err := time.ParseDuration(c.MaxTurnDurationStr)
+	if err != nil {
+		return 0
+	}
+	return d
 }
 
 // ModelFor returns the model to use for the given agent name, preferring
@@ -205,6 +228,12 @@ func merge(dst *Config, src Config) {
 	}
 	if src.MaxTurns != 0 {
 		dst.MaxTurns = src.MaxTurns
+	}
+	if src.MaxTurnDurationStr != "" {
+		dst.MaxTurnDurationStr = src.MaxTurnDurationStr
+	}
+	if src.LogWindow != 0 {
+		dst.LogWindow = src.LogWindow
 	}
 	if src.Model != "" {
 		dst.Model = src.Model

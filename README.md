@@ -10,23 +10,30 @@ departai
   ├─► Interactive REPL with autocomplete
   │
   ├─► User types a task prompt
-  │     └─► Agents start working in relay turns:
+  │     │
+  │     ├─► Spec pre-turns (collaborative): each agent contributes Goal +
+  │     │   Acceptance Criteria + Files in scope to a shared spec.md before
+  │     │   any code is written. Append-only — later agents can extend but
+  │     │   not weaken what earlier ones defined.
+  │     │
+  │     └─► Relay loop:
   │
-  │         Turn 1 (Alpha):  Implements navigation + CTA changes → Complete: no
-  │         Turn 2 (Beta):   Reviews Alpha, finds missing OG image fix, implements it → Complete: no
-  │         Turn 3 (Alpha):  Reviews Beta's fix, runs tests, finds nothing wrong → Complete: yes
-  │         Turn 4 (Beta):   Reviews everything, confirms all requirements met → Complete: yes
-  │         └─► Consensus → task ends
+  │         Turn 1 (Alpha):  Implements navigation + CTA → marks criterion [x] → Complete: no
+  │         Turn 2 (Beta):   Reviews Alpha, fixes missing OG image, marks criterion [x] → Complete: no
+  │         Turn 3 (Alpha):  Reviews Beta, runs tests, all criteria checked → Complete: yes
+  │         Turn 4 (Beta):   Reviews everything, made zero changes → Complete: yes
+  │         └─► Consensus + spec satisfied → task ends
   │
   ├─► User types another prompt (same task context)
   │     └─► Appended as directive, agents continue from where they left off
+  │     └─► /respec re-runs the pre-turn loop to integrate the directive into the spec
   │
   └─► /new to start fresh, /resume to pick a previous task
 ```
 
 **Why sequential turns?** Each agent gets a fresh context window. The task log is the handoff mechanism — each agent reads what was done and continues from there. This avoids context window exhaustion on large tasks.
 
-**Why two agents?** They critically review each other's work. An agent can only say "Complete: yes" if it made zero code changes during its turn — meaning it reviewed the other's work and found nothing wrong. This forces a real verification cycle.
+**Why two agents?** They critically review each other's work. An agent can only say "Complete: yes" if (1) it made zero code changes during its turn — meaning it reviewed the other's work and found nothing wrong — AND (2) every Acceptance Criterion in the spec is checked off. This forces a real verification cycle anchored to a stable definition of done.
 
 ## Installation
 
@@ -80,18 +87,18 @@ The REPL shows a banner with current config and a prompt. Type `/` to see autoco
   DepartAI — AI Agent Orchestrator
 
   Work dir     : /Users/you/projects/my-app
-  Backend      : claude
+  Mode         : dev
   Max turns    : unlimited
+  Max turn time: no limit
+  Log window   : unlimited
 
-  Models:
-    Alpha Global : claude-opus-4-5
-    Alpha Local  : (not set)
-    Beta Global  : claude-opus-4-5
-    Beta Local   : claude-sonnet-4-5
+  Agents:
+    Alpha : claude / claude-opus-4-5
+    Beta  : codex / gpt-5.3-codex
 
   Type a task to start, or /help for commands.
 
-departai> Build a REST API with user authentication
+departai (dev)> Build a REST API with user authentication
 ```
 
 ### Direct mode
@@ -164,11 +171,22 @@ All commands use the `/` prefix with hierarchical autocomplete.
 | `/model beta [<name>]` | Show/set Agent Beta's model (validated) |
 | `/model <agent> unset` | Clear an agent's override (inherits global) |
 | `/continue` | Continue the active task's relay loop |
+| `/respec` | One-shot: force a fresh spec pre-turn before the next prompt or `/continue` (re-evaluates the spec to incorporate new directives or current state) |
 | `/resume` | Select a previous task from a list |
 | `/new` | Deselect active task (next prompt = new task) |
 | `/exit`, `/quit` | Exit departai |
 
-`exit` and `quit` also work without `/`. Press **Ctrl+C** or **Ctrl+D** to exit.
+`exit` and `quit` also work without `/`. Press **Ctrl+D** on an empty line to exit. **Ctrl+C** cancels the current line without exiting (standard terminal UX).
+
+The REPL supports **multi-line input** — long prompts wrap automatically to fit the terminal width and the editor grows vertically as you type. The prompt prefix is shown only on the first line; continuation lines align under the input column.
+
+- **Shift+Enter** inserts a newline (multi-line input). Works in modern terminals that distinguish Shift+Enter from Enter via the kitty keyboard protocol: kitty, iTerm2 (with "Report modifiers using CSI u" enabled), alacritty, ghostty, WezTerm.
+- **Alt+Enter** is the universal fallback for terminals that send Shift+Enter as a plain `\r` (Terminal.app default, older terminals).
+- **Enter** submits the current input.
+
+Pasting large multi-line texts works as expected — bracketed paste is enabled, so the entire paste is treated as a single insert (newlines inside don't submit early).
+
+**Up/Down** arrows navigate command history when the cursor is at the first/last line of the input; otherwise they move the cursor between lines. Command history persists across sessions in `~/.departai/history.txt`.
 
 ### Config keys for `/config set`
 
@@ -181,6 +199,8 @@ All commands use the `/` prefix with hierarchical autocomplete.
 | `backend.alpha` | `/config set backend.alpha claude` | Override backend for Agent Alpha |
 | `backend.beta` | `/config set backend.beta codex` | Override backend for Agent Beta |
 | `max-turns` | `/config set max-turns 20` | Max turns per run (0 = unlimited) |
+| `max-turn-duration` | `/config set max-turn-duration 15m` | Per-turn wall-clock budget (Go duration format, e.g. `15m`, `1h30m`); empty = no limit |
+| `log-window` | `/config set log-window 6` | Inject only the last N turns into each prompt (0 = full log). Reduces token cost on long tasks |
 | `mode` | `/config set mode ask` | Active mode: `dev` (default) or `ask` |
 | `instructions` | `/config set instructions ./rules.md` | Custom instructions file |
 | `blocked-commands` | `/config set blocked-commands "WebFetch,rm -rf"` | Comma-separated list of tools/patterns agents must NOT use (soft enforcement) |
@@ -202,6 +222,8 @@ After any config change, a menu asks where to save: **Project** (default), **Glo
 | `--backend` | `claude` | Agent backend: `claude` or `codex` |
 | `--instructions` | built-in | Path to custom agent protocol markdown file |
 | `--max-turns` | unlimited (0) | Max turns per run; 0 = no limit |
+| `--max-turn-duration` | no limit | Per-turn wall-clock budget (e.g. `15m`, `1h30m`); empty = no limit |
+| `--log-window` | unlimited (0) | Inject only the last N turns into each prompt; 0 = full log |
 
 ## Configuration
 
@@ -220,13 +242,18 @@ agent_backend: claude           # default backend: "claude" or "codex"
 backend_alpha: claude           # per-agent backend overrides (optional)
 backend_beta: codex             # Alpha uses Claude, Beta uses Codex
 
-max_turns: 0                    # 0 = unlimited
+max_turns: 0                    # turn-count cap per run (0 = unlimited)
+max_turn_duration: 15m          # per-turn wall-clock budget (Go duration; empty = no limit)
+log_window: 6                   # inject only the last N turns into prompts (0 = full log)
 
 model: claude-opus-4-5          # default model (model names depend on the backend)
 model_alpha: claude-opus-4-5    # per-agent model overrides (optional)
 model_beta: gpt-5.3-codex       # each agent can use its backend's models
 
 # instructions_file: ./my-instructions.md
+# blocked_commands:
+#   - WebFetch
+#   - "rm -rf"
 ```
 
 ## Modes — `/dev` and `/ask`
@@ -260,6 +287,61 @@ The active mode is always visible:
 
 Each mode has its own built-in agent protocol. The dev mode emphasises code-edit cycles + tests; the ask mode emphasises evidence-based reasoning, citing sources, and answering precisely. Both share the same two-agent relay and consensus rule.
 
+## Definition of Done — the spec
+
+Every task gets a `spec.md` file alongside the task log. It is the **stable contract** both agents work from: Goal, Acceptance Criteria, Files in scope, Open questions, Decisions log. The orchestrator only declares the task complete when every Acceptance Criterion is checked off — no amount of agent enthusiasm overrides this.
+
+### How the spec is populated
+
+When a task is created, `spec.md` starts in `Status: DRAFT`. Before any code is written, the orchestrator runs a **spec pre-turn** for each agent in sequence:
+
+```
+Spec Pre-turn 1/2 (Alpha):  Drafts initial Goal + Acceptance Criteria + Files in scope
+                            from the user's prompt. Sets Status to ACTIVE.
+Spec Pre-turn 2/2 (Beta):   Reviews Alpha's draft, ADDS missing criteria/files,
+                            moves ambiguities to Open questions. Append-only —
+                            cannot remove or weaken what Alpha defined.
+```
+
+Both agents read the user's prompt and contribute their best version. The cross-vendor diversity catches blind spots in the spec itself, not just in the code.
+
+After the pre-turn loop, the regular relay starts with the spec as anchor. Every turn:
+
+- Reads the spec at the top of the prompt
+- Marks `- [ ]` → `- [x]` on Acceptance Criteria as work is verified
+- Appends rationale to **Decisions log** when making non-obvious choices
+- Escalates ambiguities to **Open questions** rather than guessing
+- Cannot remove or weaken existing criteria — the contract is append-only
+
+### `/respec` — re-evaluate the spec
+
+When you add a new directive to an active task that meaningfully changes scope, the spec needs to be updated to reflect it. Type `/respec` before your prompt:
+
+```
+departai (dev) [task-id]> /respec
+  ✓ Spec re-evaluation queued
+    Next prompt (or /continue) will run the spec pre-turns first.
+
+departai (dev) [task-id]> también añade login con OAuth
+  → Spec Pre-turn 1/2 (Alpha)   ← integrates the directive into the spec
+  → Spec Pre-turn 2/2 (Beta)    ← reviews and extends if needed
+  → Turn N (relay normal con spec actualizado)
+```
+
+`/respec` is one-shot — it consumes itself after the next prompt or `/continue`. It applies append-only rules: agents add criteria for the new directive but cannot remove existing ones. If a directive contradicts an existing criterion, the conflict goes to **Open questions** for the relay to resolve.
+
+If you forget `/respec` and just type the directive, the relay still incorporates it (agents read User Directives in the task log), but the spec criteria stay as they were — agents may or may not extend them. `/respec` makes the spec update explicit and verifiable.
+
+### Spec-aware completion
+
+The relay stops only when ALL of:
+
+1. The last two consecutive turns both report `**Complete**: yes`
+2. The spec `Status` is `ACTIVE` (not DRAFT)
+3. **Every** Acceptance Criterion is checked `- [x]`
+
+If agents declare `Complete: yes` while criteria are unchecked, the orchestrator overrides them and continues the relay with a warning. The spec is the source of truth.
+
 ## Security — restricting commands
 
 Agents run with full permissions and can use any tool the backend exposes (filesystem, shell, web, MCPs, etc.). For sensitive projects you can configure a blocklist of commands or tools that agents must NOT use.
@@ -286,15 +368,137 @@ When the blocklist is non-empty, departai injects a "Forbidden Commands" section
 
 Global + project blocklists are **union-merged**: a project cannot un-block what's blocked globally. The merged list shows up in the banner as `Blocked : N command(s)` and in `/config` output.
 
+## Reliability Features
+
+Long-running autonomous relays can fail in subtle ways: an agent stalls, two agents disagree forever, a task quietly drifts off-scope, the prompt grows linearly forever as the log accumulates. departai includes opt-in safeguards for each.
+
+### Per-turn time budget
+
+Set `max_turn_duration` (or `--max-turn-duration`) and the orchestrator forcibly cancels a turn that exceeds the budget:
+
+```yaml
+max_turn_duration: 15m
+```
+
+When set, the prompt for every turn includes a **Time budget** section telling the agent how long it has, instructing it to checkpoint progress to the task log every 3-5 substantial actions, and to stop gathering context at ~80% of the budget so it can write its turn summary.
+
+If the deadline fires anyway, the orchestrator:
+- Kills the agent process via context cancellation
+- Appends a synthetic turn entry to the task log marking the timeout
+- Continues the relay with the next agent (whose budget is fresh)
+
+The next agent reads the timeout note plus whatever the killed agent had time to write, and picks up from there. Time pressure alone is **never** a reason for an agent to escalate to the human — it just means the next agent gets a fresh budget.
+
+### `Blocked on` — escalating to the human
+
+Agents can pause the relay when they hit a decision the human must make. They add an optional field to their turn summary:
+
+```markdown
+**Complete**: no
+**Blocked on**: The OAuth flow needs to know whether to use PKCE or implicit
+flow. Acceptance criterion is ambiguous — need human decision.
+```
+
+The orchestrator detects the field and surfaces the question:
+
+```
+🚧 Agent Beta is blocked
+   The OAuth flow needs to know whether to use PKCE or implicit flow.
+   Acceptance criterion is ambiguous — need human decision.
+
+Type a directive to unblock, or /continue to tell agents to decide themselves.
+```
+
+Three responses:
+- **Type a prompt** — appended as a User Directive that resolves the question, relay continues
+- **`/continue`** — relay continues without new info; the next agent sees the previous block and the protocol's anti-loop rule says "if the human did not respond, decide yourselves"
+- **`/new`** — abandon
+
+The protocol explicitly forbids using `Blocked on` for time pressure or technical workarounds. Reserved for genuine human-intent decisions.
+
+### Scope warnings
+
+The spec's `Files in scope` section names the files agents should be touching. If a turn modifies files outside that list — and doesn't add them to scope with a Decisions log entry — the next agent's prompt receives a warning:
+
+```
+## Scope warning
+
+The previous turn (Turn 4, Agent Beta) modified files NOT listed in `Files in scope`:
+- /unrelated/config.go
+
+Either:
+- Justify the change in **Decisions log** AND add the file to `Files in scope`, or
+- Revert the off-scope change.
+```
+
+Soft enforcement (no syscall blocking), consistent with `blocked_commands`. The next agent reviews the off-scope change and either legitimises it (adds to scope + justification) or reverts.
+
+> **Limitation**: file-modification tracking relies on Claude's per-tool stream events (`Edit`, `Write`, `MultiEdit`, `NotebookEdit`). Codex only exposes `Bash` with the raw command — modifications inside bash (`cat >`, `sed -i`, etc.) are not captured. Detection works when at least one agent is Claude; degrades to no-op when both are Codex.
+
+### Oscillation detection
+
+Two agents can disagree forever — Alpha fixes X, Beta breaks X, Alpha fixes again, ad infinitum. The orchestrator watches for this pattern: if the last 4 turns all touch ≥50% the same files (Jaccard overlap) AND no new Acceptance Criteria have been checked, it injects a warning:
+
+```
+## Possible oscillation detected
+
+The last 4 turns have all touched mostly the same files (foo.go, bar.go) without
+any new Acceptance Criteria being checked off.
+
+Step back and identify the root cause:
+- Are you and the previous agent disagreeing on the same point?
+- Is there a misunderstanding of the spec?
+- Is the criterion underspecified?
+
+Take ONE decisive action this turn — or, if there's genuine disagreement that
+needs human input, set **Blocked on** with the specifics.
+
+If no progress within the next couple of turns, the orchestrator will stop the
+relay and return control to the human.
+```
+
+If the pattern persists for 2 more turns (6 total), the orchestrator stops the relay and surfaces the situation:
+
+```
+🌀 Oscillation detected — relay stopped
+   Last 6 turns kept touching: foo.go, bar.go
+   Without new Acceptance Criteria being checked.
+
+Type a directive to break the loop, or /continue to retry one more cycle.
+```
+
+`/continue` resets the detection — the relay gets a fresh K-turn window to escape. If it loops again, stops again. The same Codex limitation applies: oscillation detection works when at least one agent is Claude.
+
+### Log windowing
+
+For very long tasks the task log can grow to hundreds of turns. Injecting the entire log into every prompt is expensive and pushes recent context away from the agent's focus. Set `log_window` (or `--log-window`) to inject only the last N turns:
+
+```yaml
+log_window: 6
+```
+
+What's preserved regardless of windowing:
+- The task header and `## Original Task`
+- **All** `## User Directive` blocks (directives may add requirements)
+- The last N `## Turn` entries
+- An omission marker (`> _Turns 1–14 omitted to keep context bounded — full history in task-log.md._`) just before the kept turns
+
+The full log on disk is never trimmed — the windowing only affects what's injected into each agent's prompt. The spec acts as the long-term anchor: Decisions log, Open questions, and checked criteria preserve the durable state.
+
+Default is `0` (no windowing) for backward compatibility. Enable on long-running projects.
+
 ## Agent Protocol
 
 Agents follow a built-in protocol (overridable with `--instructions`):
 
+- **Anchor on the spec** — the `spec.md` is the definition of done. Mark `[x]` on Acceptance Criteria as work is verified. Append to **Decisions log** for non-obvious choices. Move ambiguities to **Open questions**. Append-only — never weaken or remove existing criteria.
 - **Review first** — each agent critically reviews the previous agent's work before doing anything else. Look for bugs, missing edge cases, regressions.
 - **Fix, don't note** — if something is wrong, fix it. Don't just write "there's a bug".
 - **Run tests** — execute existing tests, write new ones if the project has a test framework.
 - **Incremental work** — focus on one aspect per turn for large tasks. Leave clear handoff notes.
-- **Complete: yes requires zero changes** — an agent can only mark "Complete: yes" if it reviewed the other agent's work, found no issues, and made no code changes itself. This forces a real verification cycle.
+- **Complete: yes requires (1) zero changes AND (2) all spec criteria checked** — an agent can only mark "Complete: yes" if it reviewed the other agent's work, found no issues, made no code changes itself, AND every Acceptance Criterion is `- [x]`. This forces a real verification cycle anchored to the spec.
+- **Treat orchestrator warnings as priority** — when the prompt includes a `## Scope warning` or `## Possible oscillation detected` section, address it FIRST before continuing the work.
+- **Escalate to the human only for genuine intent decisions** — set `**Blocked on**: <reason>` in the turn summary only when a decision genuinely affects the human's intent and the spec doesn't unambiguously cover it. Time pressure or technical workarounds are NOT valid reasons.
 
 ### Turn summary format
 
@@ -320,12 +524,22 @@ image regenerated successfully, grep confirms no stray registration references.
 
 **Complete**: yes
 
+**Blocked on**: <OPTIONAL — only set when escalating to the human; see Reliability Features above>
+
 ---
 ```
 
+The `**Working Directory**` field must be the **project root** (where source code lives), not the task directory itself. If an agent reports a different path than what the orchestrator started with, the task directory is moved to match — this lets agents discover that the actual project lives somewhere else and signal it back.
+
 ### Completion consensus
 
-The orchestrator stops when the last **two consecutive turns** both report `Complete: yes`. Since an agent can only say "yes" without making changes, this guarantees a review cycle: implement → review/fix → verify → confirm.
+The orchestrator stops when ALL of:
+
+1. The last **two consecutive turns** both report `Complete: yes`
+2. The spec `Status` is `ACTIVE` (not DRAFT)
+3. **Every** Acceptance Criterion in the spec is checked `- [x]`
+
+Since an agent can only say "yes" without making changes, this guarantees a review cycle: implement → review/fix → verify → confirm. The spec criteria requirement adds a second anchor: agents cannot prematurely declare done if the spec still has open work.
 
 ## Shared Context System
 
@@ -334,12 +548,17 @@ The orchestrator stops when the last **two consecutive turns** both report `Comp
 ```
 <workdir>/
 └── .departai/
-    ├── config.yml                           ← project-level config
+    ├── config.yml                              ← project-level config
     └── tasks/
         └── 20260418-build-rest-api/
-            ├── task-log.md                  ← structured handoff log
-            ├── turn-1-agent-alpha-raw.log   ← activity + output (no internal prompts)
-            └── turn-2-agent-beta-raw.log
+            ├── task-log.md                     ← structured handoff log
+            ├── spec.md                         ← definition of done (Goal, Criteria, Files in scope, ...)
+            ├── spec-preturn-1-agent-alpha-raw.log  ← spec pre-turn raw activity
+            ├── spec-preturn-2-agent-beta-raw.log
+            ├── turn-1-agent-alpha-raw.log      ← per-turn activity + output (no internal prompts)
+            ├── turn-1-agent-alpha-files.txt    ← per-turn files modified (for scope/oscillation detection)
+            ├── turn-2-agent-beta-raw.log
+            └── turn-2-agent-beta-files.txt
 ```
 
 ### Git recommendations
@@ -408,17 +627,22 @@ departai/
     │       ├── codex.go        # Codex CLI implementation + model validation
     │       └── stream.go       # Codex JSONL parser
     ├── orchestrator/
-    │   └── orchestrator.go     # turn loop, prompt builder, consensus, resume, ESC-to-stop
+    │   └── orchestrator.go     # turn loop, spec pre-turns, prompt builder, consensus, ESC-to-stop,
+    │                           # ErrAgentBlocked / ErrTurnTimeout / ErrOscillationDetected,
+    │                           # scope + oscillation detection
     └── tasklog/
-        └── tasklog.go          # task directory, log read/write/parse, load, list, directives
+        ├── tasklog.go          # task directory, log read/write/parse, load, list, directives,
+        │                       # spec.md primitives, windowed content, touched-files sidecars,
+        │                       # synthetic timeout entries
+        └── tasklog_test.go     # parsing, spec, windowing, scope, relocate-safety tests
 ```
 
 ### Key dependencies
 
 | Package | Purpose |
 |---------|---------|
-| `c-bata/go-prompt` | Interactive REPL with autocomplete |
-| `charmbracelet/bubbletea` | TUI for streaming agent output |
+| `knz/bubbline` | Interactive REPL with multi-line input, autocomplete, persistent history |
+| `charmbracelet/bubbletea` | TUI for streaming agent output (also powers bubbline) |
 | `charmbracelet/bubbles` | Viewport component for scrollable content |
 | `charmbracelet/lipgloss` | TUI styling |
 | `fatih/color` | ANSI colors for non-TUI output |

@@ -4,14 +4,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
-	goprompt "github.com/c-bata/go-prompt"
+	"github.com/knz/bubbline/history"
 	"github.com/manifoldco/promptui"
-	"golang.org/x/term"
 
 	claudeagent "github.com/manurgdev/departai/internal/agent/claude"
 	codexagent "github.com/manurgdev/departai/internal/agent/codex"
@@ -22,54 +23,92 @@ import (
 )
 
 // runInteractive starts the REPL that lets users type tasks interactively.
-// Slash commands get autocomplete via go-prompt; everything else is a task prompt.
+// Built on knz/bubbline (a bubbletea-based line editor): multi-line input with
+// auto-resize, hierarchical autocomplete via Tab, persistent history across
+// sessions, smart Up/Down (history at line boundaries, cursor movement
+// otherwise). Ctrl+C cancels the current line; Ctrl+D / /exit / /quit exit.
 func runInteractive(workDir string, cfg config.Config) error {
 	ui.WelcomeBanner(workDir, cfg)
 
-	// Save terminal state before go-prompt switches to raw mode.
-	// Needed for clean exit via Ctrl+C (os.Exit won't run defers).
-	var restoreTerminal func()
-	if oldState, err := term.GetState(int(os.Stdin.Fd())); err == nil {
-		restoreTerminal = func() { term.Restore(int(os.Stdin.Fd()), oldState) }
-	}
-
-	// Mutable config pointer — the executor closure modifies it via /config set.
 	cfgPtr := &cfg
-
-	// Current task tracking. When set, prompts are appended as directives to
-	// this task instead of creating a new one.
 	var currentTaskDir string
+	var respecNextRun bool
 
-	// Helper: run or resume a task and handle stop/completion.
-	executeTask := func(taskDir string, isResume bool) {
+	executeTask := func(taskDir string, isResume bool, forceSpecPreturn bool) {
 		var td string
 		var err error
 		if isResume {
-			td, err = resumeTask(workDir, *cfgPtr, taskDir)
+			td, err = resumeTask(workDir, *cfgPtr, taskDir, forceSpecPreturn)
 		} else {
-			td, err = runTask(workDir, *cfgPtr, taskDir) // taskDir is actually the prompt here
+			td, err = runTask(workDir, *cfgPtr, taskDir, forceSpecPreturn)
 		}
-		if errors.Is(err, orchestrator.ErrUserStopped) {
+
+		var blocked *orchestrator.ErrAgentBlocked
+		var oscillation *orchestrator.ErrOscillationDetected
+		switch {
+		case errors.As(err, &blocked):
+			currentTaskDir = td
+			ui.AgentBlocked(blocked.Agent, blocked.Reason)
+		case errors.As(err, &oscillation):
+			currentTaskDir = td
+			ui.OscillationDetected(oscillation.Files, oscillation.Turns)
+		case errors.Is(err, orchestrator.ErrUserStopped):
 			currentTaskDir = td
 			ui.TaskStopped()
-		} else if err != nil {
+		case err != nil:
 			ui.Error(fmt.Sprintf("task failed: %v", err))
+		default:
+			if td != "" {
+				currentTaskDir = td
+			}
 		}
-		// On consensus: keep currentTaskDir — the task is done but still "selected"
-		// so the user can add more directives if needed.
 		ui.TaskSeparator()
 	}
 
-	// Executor is called by go-prompt on every Enter press.
-	executor := func(line string) {
-		line = strings.TrimSpace(line)
+	// Persistent history at ~/.departai/history.txt. Best-effort: any error
+	// (no home dir, permission, etc.) silently degrades to in-memory only.
+	histPath := historyFilePath()
+	var hist []string
+	if histPath != "" {
+		_ = os.MkdirAll(filepath.Dir(histPath), 0755)
+		if loaded, err := history.LoadHistory(histPath); err == nil {
+			hist = loaded
+		}
+	}
+
+	for {
+		prompt := buildPromptPrefix(cfgPtr.Mode, currentTaskDir)
+
+		val, err := runREPL(hist, prompt)
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				fmt.Println()
+				return nil
+			}
+			if errors.Is(err, errCanceled) {
+				fmt.Println("^C")
+				continue
+			}
+			ui.Error(fmt.Sprintf("input error: %v", err))
+			continue
+		}
+
+		line := strings.TrimSpace(val)
+		if line == "" {
+			continue
+		}
+		// Append to history (de-duplicating consecutive duplicates) and best-effort save.
+		if len(hist) == 0 || hist[len(hist)-1] != val {
+			hist = append(hist, val)
+			if histPath != "" {
+				_ = history.SaveHistory(hist, histPath)
+			}
+		}
 
 		switch {
-		case line == "":
-			return
-
 		case line == "/exit" || line == "/quit" || line == "exit" || line == "quit":
-			gracefulExit(restoreTerminal)(nil)
+			fmt.Println()
+			return nil
 
 		case line == "/help":
 			ui.InteractiveHelp()
@@ -85,20 +124,35 @@ func runInteractive(workDir string, cfg config.Config) error {
 		case line == "/continue":
 			if currentTaskDir == "" {
 				ui.NoActiveTask()
-				return
+				continue
 			}
-			executeTask(currentTaskDir, true)
+			force := respecNextRun
+			respecNextRun = false
+			executeTask(currentTaskDir, true, force)
+
+		case line == "/respec":
+			if currentTaskDir == "" {
+				ui.RespecNoActiveTask()
+				continue
+			}
+			if respecNextRun {
+				ui.RespecAlreadyQueued()
+				continue
+			}
+			respecNextRun = true
+			ui.RespecQueued()
 
 		case line == "/resume":
 			selected := handleResumeCommand(workDir)
 			if selected == "" {
-				return
+				continue
 			}
 			currentTaskDir = selected
 			ui.TaskSelected(currentTaskDir)
 
 		case line == "/new":
 			currentTaskDir = ""
+			respecNextRun = false
 			ui.TaskCleared()
 
 		case line == "/config" || strings.HasPrefix(line, "/config "):
@@ -114,193 +168,129 @@ func runInteractive(workDir string, cfg config.Config) error {
 			ui.ConfigSetError(fmt.Sprintf("unknown command: %s (type /help for commands)", line))
 
 		default:
-			// User typed a prompt (not a command).
+			// Plain text — task prompt.
 			if currentTaskDir != "" {
-				// Active task exists — append as a new directive and continue.
 				tl, err := tasklog.Load(currentTaskDir)
 				if err != nil {
 					ui.Error(fmt.Sprintf("loading task: %v", err))
-					return
+					continue
 				}
 				if err := tl.AppendUserDirective(line); err != nil {
 					ui.Error(fmt.Sprintf("appending directive: %v", err))
-					return
+					continue
 				}
-				executeTask(currentTaskDir, true)
+				force := respecNextRun
+				respecNextRun = false
+				executeTask(currentTaskDir, true, force)
 			} else {
-				// No active task — create a new one.
-				taskDir, err := runTask(workDir, *cfgPtr, line)
-				if errors.Is(err, orchestrator.ErrUserStopped) {
-					currentTaskDir = taskDir
-					ui.TaskStopped()
-				} else if err != nil {
-					ui.Error(fmt.Sprintf("task failed: %v", err))
-				} else {
-					currentTaskDir = taskDir // keep as active task
-				}
-				ui.TaskSeparator()
+				respecNextRun = false
+				executeTask(line, false, false)
 			}
 		}
 	}
-
-	p := goprompt.New(
-		executor,
-		completer,
-		goprompt.OptionLivePrefix(func() (string, bool) {
-			mode := cfgPtr.Mode
-			if mode == "" {
-				mode = "dev"
-			}
-			if currentTaskDir != "" {
-				short := filepath.Base(currentTaskDir)
-				if len(short) > 25 {
-					short = short[:22] + "..."
-				}
-				return fmt.Sprintf("departai (%s) [%s]> ", mode, short), true
-			}
-			return fmt.Sprintf("departai (%s)> ", mode), true
-		}),
-		goprompt.OptionPrefixTextColor(goprompt.Cyan),
-		goprompt.OptionPreviewSuggestionTextColor(goprompt.DarkGray),
-		goprompt.OptionSuggestionBGColor(goprompt.DarkGray),
-		goprompt.OptionSuggestionTextColor(goprompt.White),
-		goprompt.OptionSelectedSuggestionBGColor(goprompt.Cyan),
-		goprompt.OptionSelectedSuggestionTextColor(goprompt.Black),
-		goprompt.OptionDescriptionBGColor(goprompt.DarkGray),
-		goprompt.OptionDescriptionTextColor(goprompt.LightGray),
-		goprompt.OptionSelectedDescriptionBGColor(goprompt.Cyan),
-		goprompt.OptionSelectedDescriptionTextColor(goprompt.Black),
-		goprompt.OptionCompletionWordSeparator(" "),
-		goprompt.OptionCompletionOnDown(),
-		goprompt.OptionAddKeyBind(goprompt.KeyBind{
-			Key: goprompt.ControlC,
-			Fn:  gracefulExit(restoreTerminal),
-		}),
-	)
-	p.Run()
-
-	// If Run() returns (e.g. Ctrl+D), go-prompt restores the terminal itself.
-	return nil
 }
 
-// gracefulExit returns a KeyBindFunc that restores the terminal and exits cleanly.
-// go-prompt runs in raw mode, so Ctrl+C is intercepted as a byte rather than a
-// signal — we must restore the terminal state ourselves before calling os.Exit.
-func gracefulExit(restore func()) goprompt.KeyBindFunc {
-	return func(buf *goprompt.Buffer) {
-		fmt.Println()
-		if restore != nil {
-			restore()
-		}
-		os.Exit(0)
+// buildPromptPrefix returns the live prompt string in RAW form (no ANSI
+// styling). The cyan color is applied by the textarea's FocusedStyle.Prompt
+// inside the REPL model — embedding ANSI in the prompt string itself confuses
+// the textarea's width measurement (uniseg counts ANSI bytes).
+func buildPromptPrefix(mode, currentTaskDir string) string {
+	if mode == "" {
+		mode = "dev"
 	}
+	if currentTaskDir != "" {
+		short := filepath.Base(currentTaskDir)
+		if len(short) > 25 {
+			short = short[:22] + "..."
+		}
+		return fmt.Sprintf("departai (%s) [%s]> ", mode, short)
+	}
+	return fmt.Sprintf("departai (%s)> ", mode)
+}
+
+// historyFilePath returns the path to ~/.departai/history.txt, or "" if the
+// user's home directory cannot be resolved.
+func historyFilePath() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, ".departai", "history.txt")
 }
 
 // ── autocomplete ───────────────────────────────────────────────────────────
 
+// suggestion is a slash-command (or sub-token) candidate. Implements
+// complete.Entry so bubbline can render Title + Description in the menu.
+type suggestion struct {
+	text string
+	desc string
+}
+
+func (s suggestion) Title() string       { return s.text }
+func (s suggestion) Description() string { return s.desc }
+
 // Top-level slash commands.
-var topLevelCommands = []goprompt.Suggest{
-	{Text: "/help", Description: "Show available commands"},
-	{Text: "/dev", Description: "Switch to development mode (code-focused)"},
-	{Text: "/ask", Description: "Switch to ask mode (research / Q&A)"},
-	{Text: "/config", Description: "Show current configuration"},
-	{Text: "/config set", Description: "Set a config value"},
-	{Text: "/config save", Description: "Save config to file"},
-	{Text: "/model", Description: "Show all agent models"},
-	{Text: "/model alpha", Description: "Show/set Agent Alpha's model"},
-	{Text: "/model beta", Description: "Show/set Agent Beta's model"},
-	{Text: "/model unset", Description: "Clear the global model (falls back to backend default)"},
-	{Text: "/continue", Description: "Continue the active task's relay loop"},
-	{Text: "/resume", Description: "Select a previous task (does not run it)"},
-	{Text: "/new", Description: "Deselect current task — next prompt creates a new one"},
-	{Text: "/exit", Description: "Exit departai"},
-	{Text: "/quit", Description: "Exit departai"},
+var topLevelCommands = []suggestion{
+	{"/help", "Show available commands"},
+	{"/dev", "Switch to development mode (code-focused)"},
+	{"/ask", "Switch to ask mode (research / Q&A)"},
+	{"/config", "Show current configuration"},
+	{"/config set", "Set a config value"},
+	{"/config save", "Save config to file"},
+	{"/model", "Show all agent models"},
+	{"/model alpha", "Show/set Agent Alpha's model"},
+	{"/model beta", "Show/set Agent Beta's model"},
+	{"/model unset", "Clear the global model (falls back to backend default)"},
+	{"/continue", "Continue the active task's relay loop"},
+	{"/respec", "Force a spec pre-turn before the next prompt or /continue"},
+	{"/resume", "Select a previous task (does not run it)"},
+	{"/new", "Deselect current task — next prompt creates a new one"},
+	{"/exit", "Exit departai"},
+	{"/quit", "Exit departai"},
 }
 
 // Subcommands for "/config <sub>".
-var configSubcommands = []goprompt.Suggest{
-	{Text: "set", Description: "Set a config value for this session"},
-	{Text: "save", Description: "Save config to project or global file"},
+var configSubcommands = []suggestion{
+	{"set", "Set a config value for this session"},
+	{"save", "Save config to project or global file"},
 }
 
 // Keys for "/config set <key>".
-var configSetKeys = []goprompt.Suggest{
-	{Text: "model", Description: "Global model for both agents"},
-	{Text: "model.alpha", Description: "Override model for Agent Alpha"},
-	{Text: "model.beta", Description: "Override model for Agent Beta"},
-	{Text: "backend", Description: "Default backend (claude, codex)"},
-	{Text: "backend.alpha", Description: "Override backend for Agent Alpha"},
-	{Text: "backend.beta", Description: "Override backend for Agent Beta"},
-	{Text: "max-turns", Description: "Maximum agent turns (integer)"},
-	{Text: "instructions", Description: "Path to instructions markdown file"},
-	{Text: "mode", Description: "Active mode: dev or ask"},
-	{Text: "blocked-commands", Description: "Comma-separated tools/commands agents must NOT use"},
+var configSetKeys = []suggestion{
+	{"model", "Global model for both agents"},
+	{"model.alpha", "Override model for Agent Alpha"},
+	{"model.beta", "Override model for Agent Beta"},
+	{"backend", "Default backend (claude, codex)"},
+	{"backend.alpha", "Override backend for Agent Alpha"},
+	{"backend.beta", "Override backend for Agent Beta"},
+	{"max-turns", "Maximum agent turns (integer)"},
+	{"max-turn-duration", "Per-turn wall-clock budget (e.g. 15m, 1h30m)"},
+	{"log-window", "Inject only the last N turns into each prompt (0 = full log)"},
+	{"instructions", "Path to instructions markdown file"},
+	{"mode", "Active mode: dev or ask"},
+	{"blocked-commands", "Comma-separated tools/commands agents must NOT use"},
 }
 
 // Targets for "/config save <target>".
-var configSaveTargets = []goprompt.Suggest{
-	{Text: "global", Description: "Save to ~/.departai/config.yml"},
+var configSaveTargets = []suggestion{
+	{"global", "Save to ~/.departai/config.yml"},
 }
 
 // Subcommands for "/model <sub>".
-var modelSubcommands = []goprompt.Suggest{
-	{Text: "alpha", Description: "Show/set Agent Alpha's model"},
-	{Text: "beta", Description: "Show/set Agent Beta's model"},
-	{Text: "unset", Description: "Clear the global model (falls back to backend default)"},
+var modelSubcommands = []suggestion{
+	{"alpha", "Show/set Agent Alpha's model"},
+	{"beta", "Show/set Agent Beta's model"},
+	{"unset", "Clear the global model (falls back to backend default)"},
 }
 
 // Values suggested after "/model alpha " or "/model beta ".
-var modelValueSuggestions = []goprompt.Suggest{
-	{Text: "unset", Description: "Clear this agent's override (inherits global)"},
+var modelValueSuggestions = []suggestion{
+	{"unset", "Clear this agent's override (inherits global)"},
 }
 
-// completer provides hierarchical, context-aware suggestions.
-func completer(d goprompt.Document) []goprompt.Suggest {
-	text := d.TextBeforeCursor()
-
-	// No completions for non-slash input (task prompts).
-	if !strings.HasPrefix(text, "/") {
-		return nil
-	}
-
-	// "/config save " → suggest targets
-	if strings.HasPrefix(text, "/config save ") {
-		return goprompt.FilterHasPrefix(configSaveTargets, d.GetWordBeforeCursor(), true)
-	}
-
-	// "/config set ..." → suggest keys while typing the key, or model values
-	// (e.g. "unset") while typing a value for a model key.
-	if strings.HasPrefix(text, "/config set ") {
-		rest := strings.TrimPrefix(text, "/config set ")
-		parts := strings.SplitN(rest, " ", 2)
-		if len(parts) == 1 {
-			return goprompt.FilterHasPrefix(configSetKeys, d.GetWordBeforeCursor(), true)
-		}
-		switch parts[0] {
-		case "model", "model.alpha", "model.beta":
-			return goprompt.FilterHasPrefix(modelValueSuggestions, d.GetWordBeforeCursor(), true)
-		}
-		return nil
-	}
-
-	// "/config " → suggest subcommands
-	if strings.HasPrefix(text, "/config ") {
-		return goprompt.FilterHasPrefix(configSubcommands, d.GetWordBeforeCursor(), true)
-	}
-
-	// "/model alpha " or "/model beta " → suggest "unset" (values are otherwise free-form)
-	if strings.HasPrefix(text, "/model alpha ") || strings.HasPrefix(text, "/model beta ") {
-		return goprompt.FilterHasPrefix(modelValueSuggestions, d.GetWordBeforeCursor(), true)
-	}
-
-	// "/model " → suggest agent-specific subcommands (alpha, beta, unset)
-	if strings.HasPrefix(text, "/model ") {
-		return goprompt.FilterHasPrefix(modelSubcommands, d.GetWordBeforeCursor(), true)
-	}
-
-	// "/" → filter top-level commands
-	return goprompt.FilterHasPrefix(topLevelCommands, text, true)
-}
+// (Filter logic and popover live in repl_model.go — the 6 suggestion lists
+// declared above are consumed there directly.)
 
 // ── config command handlers ────────────────────────────────────────────────
 
@@ -346,7 +336,7 @@ func handleConfigSet(kv string, workDir string, cfg *config.Config) {
 	parts := strings.SplitN(strings.TrimSpace(kv), " ", 2)
 	if len(parts) < 2 || parts[1] == "" {
 		ui.ConfigSetError("usage: /config set <key> <value>")
-		ui.ConfigSetError("keys: model, model.alpha, model.beta, backend, backend.alpha, backend.beta, mode, max-turns, instructions, blocked-commands")
+		ui.ConfigSetError("keys: model, model.alpha, model.beta, backend, backend.alpha, backend.beta, mode, max-turns, max-turn-duration, log-window, instructions, blocked-commands")
 		return
 	}
 
@@ -418,6 +408,36 @@ func handleConfigSet(kv string, workDir string, cfg *config.Config) {
 		ui.ConfigSet(key, value)
 		promptAndSave(workDir, *cfg)
 
+	case "max-turn-duration":
+		v := strings.TrimSpace(value)
+		if isUnsetValue(v) || v == "0" {
+			cfg.MaxTurnDurationStr = ""
+			ui.ConfigSet(key, "(no limit)")
+			promptAndSave(workDir, *cfg)
+			return
+		}
+		if _, err := time.ParseDuration(v); err != nil {
+			ui.ConfigSetError(fmt.Sprintf("max-turn-duration %q invalid: %v (use Go duration format, e.g. 15m, 1h30m)", v, err))
+			return
+		}
+		cfg.MaxTurnDurationStr = v
+		ui.ConfigSet(key, v)
+		promptAndSave(workDir, *cfg)
+
+	case "log-window":
+		n, err := strconv.Atoi(value)
+		if err != nil || n < 0 {
+			ui.ConfigSetError("log-window must be 0 (full log) or a positive integer")
+			return
+		}
+		cfg.LogWindow = n
+		if n == 0 {
+			ui.ConfigSet(key, "(unlimited)")
+		} else {
+			ui.ConfigSet(key, value)
+		}
+		promptAndSave(workDir, *cfg)
+
 	case "instructions":
 		cfg.InstructionsFile = value
 		ui.ConfigSet(key, value)
@@ -453,7 +473,7 @@ func handleConfigSet(kv string, workDir string, cfg *config.Config) {
 		promptAndSave(workDir, *cfg)
 
 	default:
-		ui.ConfigSetError(fmt.Sprintf("unknown key %q (valid: model, model.alpha, model.beta, backend, backend.alpha, backend.beta, mode, max-turns, instructions, blocked-commands)", key))
+		ui.ConfigSetError(fmt.Sprintf("unknown key %q (valid: model, model.alpha, model.beta, backend, backend.alpha, backend.beta, mode, max-turns, max-turn-duration, log-window, instructions, blocked-commands)", key))
 	}
 }
 
@@ -591,8 +611,10 @@ func setModelValidated(backend, target, newValue string, onSuccess func()) {
 }
 
 // runTask creates an orchestrator for a single task prompt and runs it.
+// forceSpecPreturn forces the spec pre-turn loop even if the spec is ACTIVE
+// (no effect on a fresh task — spec starts DRAFT and pre-turns always run).
 // Returns the task directory (for tracking) and any error.
-func runTask(workDir string, cfg config.Config, prompt string) (string, error) {
+func runTask(workDir string, cfg config.Config, prompt string, forceSpecPreturn bool) (string, error) {
 	orch, err := orchestrator.New(orchestrator.Config{
 		WorkDir:          workDir,
 		Prompt:           prompt,
@@ -606,6 +628,9 @@ func runTask(workDir string, cfg config.Config, prompt string) (string, error) {
 		ModelAlpha:       cfg.ModelAlpha,
 		ModelBeta:        cfg.ModelBeta,
 		BlockedCommands:  cfg.BlockedCommands,
+		ForceSpecPreturn: forceSpecPreturn,
+		MaxTurnDuration:  cfg.MaxTurnDuration(),
+		LogWindow:        cfg.LogWindow,
 	})
 	if err != nil {
 		return "", fmt.Errorf("initialising orchestrator: %w", err)
@@ -615,7 +640,9 @@ func runTask(workDir string, cfg config.Config, prompt string) (string, error) {
 }
 
 // resumeTask resumes an existing task from its task directory.
-func resumeTask(workDir string, cfg config.Config, taskDir string) (string, error) {
+// forceSpecPreturn forces a fresh spec pre-turn loop even when the spec is
+// already ACTIVE (used by /respec to incorporate new directives).
+func resumeTask(workDir string, cfg config.Config, taskDir string, forceSpecPreturn bool) (string, error) {
 	orch, err := orchestrator.NewFromExisting(orchestrator.Config{
 		WorkDir:          workDir,
 		Mode:             cfg.Mode,
@@ -628,6 +655,9 @@ func resumeTask(workDir string, cfg config.Config, taskDir string) (string, erro
 		ModelAlpha:       cfg.ModelAlpha,
 		ModelBeta:        cfg.ModelBeta,
 		BlockedCommands:  cfg.BlockedCommands,
+		ForceSpecPreturn: forceSpecPreturn,
+		MaxTurnDuration:  cfg.MaxTurnDuration(),
+		LogWindow:        cfg.LogWindow,
 	}, taskDir)
 	if err != nil {
 		return taskDir, fmt.Errorf("resuming task: %w", err)
@@ -677,3 +707,4 @@ func handleResumeCommand(workDir string) string {
 
 	return tasks[idx].Dir
 }
+

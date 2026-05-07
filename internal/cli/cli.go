@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	claudeagent "github.com/manurgdev/departai/internal/agent/claude"
 	codexagent "github.com/manurgdev/departai/internal/agent/codex"
@@ -51,6 +52,8 @@ func Run(args []string) error {
 	dir := fs.String("dir", "", "Working directory for agents (default: current directory)")
 	instructionsFlag := fs.String("instructions", "", "Path to a custom base instructions markdown file")
 	maxTurnsFlag := fs.Int("max-turns", 0, "Maximum number of agent turns (default: unlimited)")
+	maxTurnDurationFlag := fs.String("max-turn-duration", "", "Per-turn wall-clock budget (e.g. 15m, 1h30m); empty = no limit")
+	logWindowFlag := fs.Int("log-window", 0, "Inject only the last N turns into each prompt (default: 0 = full log)")
 	modelFlag := fs.String("model", "", "Model to use (e.g. claude-opus-4-5); overrides config")
 	backendFlag := fs.String("backend", "", "Agent backend to use (default: claude)")
 
@@ -82,6 +85,18 @@ func Run(args []string) error {
 	if *maxTurnsFlag != 0 {
 		cfg.MaxTurns = *maxTurnsFlag
 	}
+	if *maxTurnDurationFlag != "" {
+		if _, err := time.ParseDuration(*maxTurnDurationFlag); err != nil {
+			return fmt.Errorf("--max-turn-duration %q invalid: %w (use Go duration format, e.g. 15m, 1h30m)", *maxTurnDurationFlag, err)
+		}
+		cfg.MaxTurnDurationStr = *maxTurnDurationFlag
+	}
+	if *logWindowFlag != 0 {
+		if *logWindowFlag < 0 {
+			return fmt.Errorf("--log-window must be 0 (no windowing) or a positive integer, got %d", *logWindowFlag)
+		}
+		cfg.LogWindow = *logWindowFlag
+	}
 	if *instructionsFlag != "" {
 		cfg.InstructionsFile = *instructionsFlag
 	}
@@ -110,6 +125,6 @@ func Run(args []string) error {
 
 	// Prompt provided → single-task direct mode.
 	prompt := strings.Join(fs.Args(), " ")
-	_, err = runTask(workDir, cfg, prompt)
+	_, err = runTask(workDir, cfg, prompt, false)
 	return err
 }

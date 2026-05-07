@@ -77,6 +77,7 @@ The current `blocked_commands` config is **soft enforcement** (prompt-injected).
 - [ ] **Stream buffering tuning** — large prompts or very verbose turns may hit the 1MB scanner buffer. Make it configurable or larger.
 - [ ] **Context window awareness** — detect when an agent is approaching its context limit and log a warning.
 - [ ] **Handle network/API failures** — retry on transient errors from the backend CLI instead of failing the turn.
+- [x] ~~**Migrate from `c-bata/go-prompt` to a maintained input library**~~ — **DONE**. Migrated to `knz/bubbline` (bubbletea-based, multi-line editing, persistent history, smart Up/Down at line boundaries). Eliminated the panic class (no zombie goroutines) and added multi-line input wrap.
 
 ## Configuration UX
 

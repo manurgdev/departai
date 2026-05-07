@@ -22,6 +22,9 @@ const AutoContinueDelay = 5 * time.Second
 // agent events with a pinned header. It blocks until the agent finishes AND
 // either the auto-continue countdown expires or the user exits review mode.
 //
+// labelOverride, when non-empty, replaces the default "Turn N" / "Turn N/M"
+// label in the header (used for spec pre-turns).
+//
 // After bubbletea exits, a compact summary is printed to the normal terminal
 // so the turn activity persists in scroll-back history.
 func RunAgentView(
@@ -30,8 +33,9 @@ func RunAgentView(
 	agentName, model string,
 	turn, maxTurns int,
 	taskStart time.Time,
+	labelOverride string,
 ) (result string, stopped bool) {
-	m := newModel(eventCh, cancelAgent, agentName, model, turn, maxTurns, taskStart)
+	m := newModel(eventCh, cancelAgent, agentName, model, turn, maxTurns, taskStart, labelOverride)
 	p := tea.NewProgram(m, tea.WithAltScreen())
 	final, _ := p.Run()
 	fm := final.(Model)
@@ -68,12 +72,13 @@ type Model struct {
 	viewport  viewport.Model
 	ready     bool // viewport initialised after first WindowSizeMsg
 
-	eventCh   <-chan agent.StreamEvent
-	agentName string
-	model     string
-	turn      int
-	maxTurns  int
-	result      string
+	eventCh       <-chan agent.StreamEvent
+	agentName     string
+	model         string
+	turn          int
+	maxTurns      int
+	labelOverride string // when non-empty, replaces "Turn N" in the header
+	result        string
 	startTime   time.Time // when this turn started
 	elapsed     time.Duration
 	taskStart   time.Time // when the entire task started (across all turns)
@@ -93,18 +98,20 @@ func newModel(
 	agentName, model string,
 	turn, maxTurns int,
 	taskStart time.Time,
+	labelOverride string,
 ) Model {
 	return Model{
-		eventCh:     ch,
-		cancelAgent: cancel,
-		agentName:   agentName,
-		model:       model,
-		turn:        turn,
-		maxTurns:    maxTurns,
-		phase:       phaseStreaming,
-		cursor:      0,
-		startTime:   time.Now(),
-		taskStart:   taskStart,
+		eventCh:       ch,
+		cancelAgent:   cancel,
+		agentName:     agentName,
+		model:         model,
+		turn:          turn,
+		maxTurns:      maxTurns,
+		labelOverride: labelOverride,
+		phase:         phaseStreaming,
+		cursor:        0,
+		startTime:     time.Now(),
+		taskStart:     taskStart,
 	}
 }
 
@@ -261,20 +268,42 @@ func (m *Model) rebuildContent() {
 		selectedEntryIdx = m.toolIdx[m.cursor]
 	}
 
+	// Width budget: viewport width minus the leading indent. Used to wrap
+	// long lines so they stay visible during streaming instead of being
+	// truncated horizontally.
+	wrapWidth := m.viewport.Width - 2
+	if wrapWidth < 20 {
+		wrapWidth = 20
+	}
+
 	for i, e := range m.entries {
 		switch e.kind {
 		case "text":
+			// Agent's "humanized" voice — primary information. Render bold,
+			// wrap to viewport width with continuation lines indented to
+			// match the leading two spaces.
 			for _, line := range strings.Split(e.title, "\n") {
 				if trimmed := strings.TrimSpace(line); trimmed != "" {
-					b.WriteString(styleFaint.Render("  "+trimmed) + "\n")
+					wrapped := wrapAndIndent(trimmed, wrapWidth, "  ", "  ")
+					b.WriteString(styleBold.Render(wrapped) + "\n")
 				}
 			}
 		case "tool":
+			// Tool calls are mechanical activity — render the marker as a
+			// scannable anchor, but fade the title so the eye lands on the
+			// agent's text first.
 			isSelected := i == selectedEntryIdx
+			marker := "  ▸ "
+			indentCont := "    " // continuation lines align with title, not marker
+			titleWrapWidth := wrapWidth - 2 // marker width
+			if titleWrapWidth < 20 {
+				titleWrapWidth = 20
+			}
+			titleWrapped := wrapAndIndent(e.title, titleWrapWidth, "", indentCont)
 			if isSelected {
-				b.WriteString(styleSelectedMarker.Render("  ▹ ") + styleSelectedTool.Render(e.title) + "\n")
+				b.WriteString(styleSelectedMarker.Render("  ▹ ") + styleSelectedTool.Render(titleWrapped) + "\n")
 			} else {
-				b.WriteString(styleBoldCyn.Render("  ▸ ") + styleBold.Render(e.title) + "\n")
+				b.WriteString(styleBoldCyn.Render(marker) + styleFaint.Render(titleWrapped) + "\n")
 			}
 			if e.expanded && e.detail != "" {
 				for _, line := range strings.Split(e.detail, "\n") {
@@ -348,11 +377,13 @@ func (m Model) renderHeader() string {
 	}
 	elapsed := m.elapsed.Round(time.Second).String()
 
-	var turnLabel string
-	if m.maxTurns > 0 {
-		turnLabel = fmt.Sprintf("Turn %d/%d", m.turn, m.maxTurns)
-	} else {
-		turnLabel = fmt.Sprintf("Turn %d", m.turn)
+	turnLabel := m.labelOverride
+	if turnLabel == "" {
+		if m.maxTurns > 0 {
+			turnLabel = fmt.Sprintf("Turn %d/%d", m.turn, m.maxTurns)
+		} else {
+			turnLabel = fmt.Sprintf("Turn %d", m.turn)
+		}
 	}
 	title := fmt.Sprintf("  %s  •  %s  •  %s", turnLabel, m.agentName, modelStr)
 
@@ -401,11 +432,13 @@ func printFinalSummary(m Model) {
 	elapsed := m.elapsed.Round(time.Second)
 
 	fmt.Println(styleRule.Render("  " + rule))
-	var turnLabel string
-	if m.maxTurns > 0 {
-		turnLabel = fmt.Sprintf("Turn %d/%d", m.turn, m.maxTurns)
-	} else {
-		turnLabel = fmt.Sprintf("Turn %d", m.turn)
+	turnLabel := m.labelOverride
+	if turnLabel == "" {
+		if m.maxTurns > 0 {
+			turnLabel = fmt.Sprintf("Turn %d/%d", m.turn, m.maxTurns)
+		} else {
+			turnLabel = fmt.Sprintf("Turn %d", m.turn)
+		}
 	}
 	fmt.Println(styleBold.Render(fmt.Sprintf(
 		"  %s  •  %s  •  %s", turnLabel, m.agentName, modelStr)) +
@@ -444,6 +477,55 @@ func buildToolDetail(evt agent.StreamEvent) string {
 		return formatDiff(evt.DiffOld, evt.DiffNew)
 	}
 	return ""
+}
+
+// wrapAndIndent word-wraps text to fit within width columns, prefixing the
+// first line with `firstIndent` and any continuation lines with `contIndent`.
+// Preserves single long tokens (e.g. URLs, file paths) on their own line if
+// they exceed the available width — better to scroll horizontally than to
+// shatter a path mid-character.
+func wrapAndIndent(text string, width int, firstIndent, contIndent string) string {
+	if text == "" {
+		return firstIndent
+	}
+	words := strings.Fields(text)
+	if len(words) == 0 {
+		return firstIndent + text
+	}
+
+	var b strings.Builder
+	b.WriteString(firstIndent)
+	cur := len(firstIndent)
+	first := true
+	for _, w := range words {
+		// width 0 or negative → just join with spaces (no wrap)
+		if width <= 0 {
+			if !first {
+				b.WriteByte(' ')
+			}
+			b.WriteString(w)
+			first = false
+			continue
+		}
+		if first {
+			b.WriteString(w)
+			cur += len(w)
+			first = false
+			continue
+		}
+		// +1 for the space we'd insert before the word
+		if cur+1+len(w) > width {
+			b.WriteByte('\n')
+			b.WriteString(contIndent)
+			b.WriteString(w)
+			cur = len(contIndent) + len(w)
+		} else {
+			b.WriteByte(' ')
+			b.WriteString(w)
+			cur += 1 + len(w)
+		}
+	}
+	return b.String()
 }
 
 func formatDiff(old, new string) string {
