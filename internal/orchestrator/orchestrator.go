@@ -611,12 +611,29 @@ type Config struct {
 	LogWindow int
 }
 
+// agentViewRunner matches the signature of tui.RunAgentView. The orchestrator
+// calls it once per agent turn to display live output. It is a field (rather
+// than a direct call) so tests can substitute a headless runner that drains
+// the event channel without launching a bubbletea program.
+type agentViewRunner func(
+	eventCh <-chan agent.StreamEvent,
+	cancelAgent context.CancelFunc,
+	agentName, model string,
+	turn, maxTurns int,
+	taskStart time.Time,
+	labelOverride string,
+) (result string, stopped bool)
+
 // Orchestrator manages the sequential agent relay until consensus or max turns.
 type Orchestrator struct {
 	cfg       Config
 	agents    []agent.Agent
 	baseInstr string
 	taskLog   *tasklog.TaskLog
+
+	// runView renders a turn's live output. nil means "use the real bubbletea
+	// TUI" (tui.RunAgentView); tests set it to a headless runner.
+	runView agentViewRunner
 
 	// Detection state — populated after a turn, consumed (and cleared) when
 	// the next prompt is built.
@@ -638,15 +655,15 @@ type Orchestrator struct {
 // Detection tunables — hardcoded for MVP. If usage shows they need adjustment,
 // expose via Config.
 const (
-	oscillationWindow          = 4   // last K turns examined for the pattern
+	oscillationWindow           = 4   // last K turns examined for the pattern
 	oscillationOverlapThreshold = 0.5 // Jaccard overlap required to call files "the same"
-	oscillationStopThreshold   = 3   // consecutive suspect turns before forced stop (1 warning + 2 more)
+	oscillationStopThreshold    = 3   // consecutive suspect turns before forced stop (1 warning + 2 more)
 )
 
 type scopeWarning struct {
-	Turn        int
-	Agent       string
-	OffScope    []string
+	Turn     int
+	Agent    string
+	OffScope []string
 }
 
 type oscillationWarning struct {
@@ -1296,7 +1313,11 @@ func (o *Orchestrator) runAgentWithTUI(ag agent.Agent, prompt string, turn int, 
 	if agModel != "" {
 		backendModel += "/" + agModel
 	}
-	_, stopped := tui.RunAgentView(eventCh, cancel, ag.Name(), backendModel, turn, o.cfg.MaxTurns, taskStart, labelOverride)
+	runView := o.runView
+	if runView == nil {
+		runView = tui.RunAgentView
+	}
+	_, stopped := runView(eventCh, cancel, ag.Name(), backendModel, turn, o.cfg.MaxTurns, taskStart, labelOverride)
 
 	// Collect agent result.
 	outcome := <-outcomeCh
