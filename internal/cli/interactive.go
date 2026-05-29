@@ -142,6 +142,9 @@ func runInteractive(workDir string, cfg config.Config) error {
 			respecNextRun = true
 			ui.RespecQueued()
 
+		case line == "/spec compact":
+			handleSpecCompactCommand(currentTaskDir)
+
 		case line == "/resume":
 			selected := handleResumeCommand(workDir)
 			if selected == "" {
@@ -244,6 +247,7 @@ var topLevelCommands = []suggestion{
 	{"/model unset", "Clear the global model (falls back to backend default)"},
 	{"/continue", "Continue the active task's relay loop"},
 	{"/respec", "Force a spec pre-turn before the next prompt or /continue"},
+	{"/spec compact", "Trim the active spec's Decisions log (archives middle entries)"},
 	{"/resume", "Select a previous task (does not run it)"},
 	{"/new", "Deselect current task — next prompt creates a new one"},
 	{"/exit", "Exit departai"},
@@ -282,6 +286,11 @@ var modelSubcommands = []suggestion{
 	{"alpha", "Show/set Agent Alpha's model"},
 	{"beta", "Show/set Agent Beta's model"},
 	{"unset", "Clear the global model (falls back to backend default)"},
+}
+
+// Subcommands for "/spec <sub>".
+var specSubcommands = []suggestion{
+	{"compact", "Trim the active spec's Decisions log (archives middle entries to spec-archive.md)"},
 }
 
 // Values suggested after "/model alpha " or "/model beta ".
@@ -666,6 +675,86 @@ func resumeTask(workDir string, cfg config.Config, taskDir string, forceSpecPret
 	return orch.TaskDir(), orch.Run()
 }
 
+// specCompactKeepFirst / specCompactKeepLast control how many bullet entries
+// of the spec's Decisions log are preserved by `/spec compact`. Hardcoded for
+// now — can be promoted to config fields if users want to tune them.
+const (
+	specCompactKeepFirst = 3
+	specCompactKeepLast  = 12
+)
+
+// handleSpecCompactCommand runs `/spec compact` against the active task's
+// spec.md, prompting the user for confirmation before writing.
+func handleSpecCompactCommand(currentTaskDir string) {
+	if currentTaskDir == "" {
+		ui.SpecCompactNoActiveTask()
+		return
+	}
+
+	tl, err := tasklog.Load(currentTaskDir)
+	if err != nil {
+		ui.Error(fmt.Sprintf("loading task: %v", err))
+		return
+	}
+
+	beforeBytes, err := specSizeBytes(tl)
+	if err != nil {
+		ui.Error(fmt.Sprintf("reading spec: %v", err))
+		return
+	}
+
+	// Dry-run-ish preview: count entries that would be archived.
+	preview, err := previewCompact(tl, specCompactKeepFirst, specCompactKeepLast)
+	if err != nil {
+		ui.Error(fmt.Sprintf("previewing compact: %v", err))
+		return
+	}
+	if preview == 0 {
+		ui.SpecCompactAlreadyCompact(specCompactKeepFirst + specCompactKeepLast)
+		return
+	}
+
+	if !ui.PromptSpecCompactConfirm(preview, specCompactKeepFirst, specCompactKeepLast) {
+		ui.SpecCompactCancelled()
+		return
+	}
+
+	removed, archive, err := tl.CompactDecisionsLog(specCompactKeepFirst, specCompactKeepLast)
+	if err != nil {
+		ui.Error(fmt.Sprintf("compacting spec: %v", err))
+		return
+	}
+
+	afterBytes, _ := specSizeBytes(tl)
+	ui.SpecCompactDone(removed, archive, beforeBytes-afterBytes)
+}
+
+// previewCompact reports how many entries CompactDecisionsLog would remove
+// without modifying any file. Mirrors the early-exit logic in the real call.
+func previewCompact(tl *tasklog.TaskLog, keepFirst, keepLast int) (int, error) {
+	spec, err := tl.ReadSpec()
+	if err != nil {
+		return 0, err
+	}
+	bullets := tasklog.CountSpecDecisions(spec)
+	if bullets <= keepFirst+keepLast {
+		return 0, nil
+	}
+	return bullets - keepFirst - keepLast, nil
+}
+
+// specSizeBytes returns the on-disk byte size of spec.md, or 0 if missing.
+func specSizeBytes(tl *tasklog.TaskLog) (int, error) {
+	info, err := os.Stat(tl.SpecPath())
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, nil
+		}
+		return 0, err
+	}
+	return int(info.Size()), nil
+}
+
 // handleResumeCommand shows a promptui.Select with existing tasks and returns
 // the selected task directory, or "" if cancelled.
 func handleResumeCommand(workDir string) string {
@@ -707,4 +796,3 @@ func handleResumeCommand(workDir string) string {
 
 	return tasks[idx].Dir
 }
-

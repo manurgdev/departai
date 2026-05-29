@@ -795,6 +795,153 @@ None
 	return os.WriteFile(path, []byte(content), 0644)
 }
 
+// decisionsLogSectionRe captures the body of "## Decisions log" up to (but
+// not into) the next "## " heading or end of file.
+//
+// Go's RE2 has no lookaheads, so group 3 captures the boundary string itself
+// (either `\n## ` or empty at \z) — the body ends where group 3 starts, and
+// callers slice the rest of the spec from that boundary forward.
+//
+// Group 1 = heading line including its trailing newline.
+// Group 2 = body content.
+// Group 3 = boundary (next section start or empty at EOF).
+var decisionsLogSectionRe = regexp.MustCompile(`(?ims)(^##\s+Decisions log[ \t]*\n)(.*?)(\n##\s+|\z)`)
+
+// decisionBulletStartRe matches the start of a bullet entry: a line beginning
+// with "- " (with optional leading whitespace).
+var decisionBulletStartRe = regexp.MustCompile(`(?m)^\s*-\s`)
+
+// CompactDecisionsLog compresses the spec's `## Decisions log` section by
+// keeping only the first keepFirst and last keepLast bullet entries; the
+// middle entries are appended to <taskdir>/spec-archive.md (creating it if
+// missing). Everything else in spec.md is preserved byte-for-byte.
+//
+// Returns the count of removed entries and the archive path. If the section
+// is missing, empty, or has fewer than keepFirst+keepLast entries, returns
+// (0, "", nil) without touching any file.
+func (tl *TaskLog) CompactDecisionsLog(keepFirst, keepLast int) (removed int, archivePath string, err error) {
+	if keepFirst <= 0 || keepLast <= 0 {
+		return 0, "", fmt.Errorf("keepFirst (%d) and keepLast (%d) must both be positive", keepFirst, keepLast)
+	}
+
+	spec, err := tl.ReadSpec()
+	if err != nil {
+		return 0, "", fmt.Errorf("reading spec: %w", err)
+	}
+
+	loc := decisionsLogSectionRe.FindStringSubmatchIndex(spec)
+	if loc == nil {
+		return 0, "", nil // no Decisions log section, nothing to do
+	}
+	bodyStart := loc[4]
+	bodyEnd := loc[5]
+	body := spec[bodyStart:bodyEnd]
+
+	bullets := splitDecisionBullets(body)
+	if len(bullets) <= keepFirst+keepLast {
+		return 0, "", nil
+	}
+
+	first := bullets[:keepFirst]
+	middle := bullets[keepFirst : len(bullets)-keepLast]
+	last := bullets[len(bullets)-keepLast:]
+
+	var nb strings.Builder
+	nb.WriteString("\n") // blank line after heading
+	for _, b := range first {
+		nb.WriteString(b)
+		nb.WriteString("\n")
+	}
+	// Blockquote (not a bullet) so a re-run of CompactDecisionsLog doesn't
+	// count this marker as another entry and shrink the section further.
+	fmt.Fprintf(&nb, "\n> _%d entradas anteriores archivadas en spec-archive.md._\n\n", len(middle))
+	for _, b := range last {
+		nb.WriteString(b)
+		nb.WriteString("\n")
+	}
+
+	newSpec := spec[:bodyStart] + nb.String() + spec[bodyEnd:]
+
+	archivePath = filepath.Join(tl.Dir, "spec-archive.md")
+	if err := appendDecisionsArchive(archivePath, middle); err != nil {
+		return 0, "", fmt.Errorf("appending archive: %w", err)
+	}
+
+	if err := os.WriteFile(tl.SpecPath(), []byte(newSpec), 0644); err != nil {
+		return 0, "", fmt.Errorf("writing spec: %w", err)
+	}
+
+	return len(middle), archivePath, nil
+}
+
+// CountSpecDecisions returns the number of bullet entries in the spec's
+// `## Decisions log` section. Returns 0 when the section is missing, contains
+// only the `(empty)` placeholder, or has no bullet items.
+func CountSpecDecisions(spec string) int {
+	loc := decisionsLogSectionRe.FindStringSubmatchIndex(spec)
+	if loc == nil {
+		return 0
+	}
+	return len(splitDecisionBullets(spec[loc[4]:loc[5]]))
+}
+
+// splitDecisionBullets parses the body of a Decisions log section into a list
+// of bullet entries. Each entry includes any continuation lines that follow
+// the leading `- `. Whitespace-only sections and the literal "(empty)"
+// placeholder return an empty slice.
+func splitDecisionBullets(body string) []string {
+	if strings.TrimSpace(body) == "" || strings.TrimSpace(body) == "(empty)" {
+		return nil
+	}
+
+	starts := decisionBulletStartRe.FindAllStringIndex(body, -1)
+	if len(starts) == 0 {
+		return nil
+	}
+
+	out := make([]string, 0, len(starts))
+	for i, s := range starts {
+		end := len(body)
+		if i+1 < len(starts) {
+			end = starts[i+1][0]
+		}
+		entry := strings.TrimRight(body[s[0]:end], " \t\n")
+		if entry != "" {
+			out = append(out, entry)
+		}
+	}
+	return out
+}
+
+// appendDecisionsArchive writes a `## Compacted at <ts>` block followed by the
+// archived entries to path, appending if the file already exists. On first
+// creation, prepends a header block explaining the file's purpose.
+func appendDecisionsArchive(path string, entries []string) error {
+	_, statErr := os.Stat(path)
+	exists := statErr == nil
+
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	var b strings.Builder
+	if !exists {
+		b.WriteString("# Spec Decisions Archive\n\n")
+		b.WriteString("Decisions log entries removed from spec.md by `/spec compact`. Oldest first.\n\n")
+	}
+	fmt.Fprintf(&b, "## Compacted at %s\n\n", time.Now().Format(time.RFC3339))
+	for _, e := range entries {
+		b.WriteString(e)
+		b.WriteString("\n")
+	}
+	b.WriteString("\n")
+
+	_, err = f.WriteString(b.String())
+	return err
+}
+
 // statusRe matches: **Status**: DRAFT  or  **Status**: ACTIVE  (case insensitive)
 var statusRe = regexp.MustCompile(`(?i)\*\*Status\*\*:\s*(DRAFT|ACTIVE)`)
 

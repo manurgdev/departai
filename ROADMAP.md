@@ -42,6 +42,7 @@ Possible future modes (each with its own protocol):
 - [ ] **Tool result display** — currently only tool calls are shown; show the result/output of each tool (especially Bash exit codes).
 - [ ] **Project rules display** — show which `CLAUDE.md`/`AGENTS.md`/`.cursorrules` files were loaded at startup or via `/config`.
 - [ ] **Inline code syntax highlighting** — in the expanded diff view, highlight diff syntax.
+- [ ] **"Connecting…" indicator before first event** — Claude CLI emits `{"type":"system","subtype":"status","status":"requesting"}` when it starts the LLM call. Surface this as a placeholder line in the TUI viewport so the first 1–3 seconds of a turn aren't a blank screen. Low priority because partial-message streaming already makes the first text/tool block appear quickly; mostly cosmetic for the very initial wait.
 
 ## CLI / distribution
 
@@ -85,6 +86,7 @@ The current `blocked_commands` config is **soft enforcement** (prompt-injected).
 - [ ] **`/config reset`** — restore defaults in session (without touching saved files).
 - [ ] **Config file validation** — on load, warn about unknown keys or invalid values instead of silently ignoring.
 - [ ] **Env var overrides** — `DEPARTAI_MODEL`, `DEPARTAI_BACKEND`, etc. for scripting.
+- [ ] **`spec_preturn_effort` config (Claude only)** — pass `--effort <low|medium|high|xhigh|max>` to the Claude CLI for spec pre-turns. Pre-turns mostly edit `spec.md` rather than reason about new code; reducing the thinking budget (e.g. default `medium`) should cut wall-clock time on `/respec` over long tasks without losing fidelity. Requires extending the agent API with a `RunOptions{Effort string}` so the orchestrator can pass it only on pre-turn calls; main turns stay at the CLI default. Codex has no equivalent flag — ignored on that backend.
 
 ## Documentation
 

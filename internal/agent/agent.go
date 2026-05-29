@@ -22,14 +22,34 @@ type Agent interface {
 
 // StreamEvent is a backend-agnostic representation of something worth showing
 // to the user during a streaming agent turn.
+//
+// Kinds:
+//   - "text"       — text content. With BlockID > 0, multiple events with
+//     the same BlockID carry the GROWING content for that
+//     block (TUI replaces the previous title in place).
+//   - "tool_start" — a tool_use block opened. Tool is set, Detail is empty,
+//     BlockID identifies the block (always > 0).
+//   - "tool"       — finalized tool call. Tool, Detail (and DiffOld/DiffNew
+//     for Edit) are populated. With BlockID > 0, the event
+//     finalizes a tool_start with the same BlockID.
+//   - "block_end"  — a content block closed. BlockID identifies which.
+//     Lets consumers drop in-flight indicators.
+//   - "result"     — the agent's final result text.
 type StreamEvent struct {
-	Kind    string // "tool", "text", "result"
-	Tool    string // tool name (only when Kind == "tool")
+	Kind    string
+	Tool    string // tool name (Kind == "tool" or "tool_start")
 	Detail  string // human-readable detail (file path, command, pattern, …)
-	Text    string // agent reasoning / narrative (only when Kind == "text")
-	Result  string // final output text (only when Kind == "result")
+	Text    string // agent reasoning / narrative (Kind == "text")
+	Result  string // final output text (Kind == "result")
 	DiffOld string // old_string from Edit input (for collapsible diff view)
 	DiffNew string // new_string from Edit input
+
+	// BlockID identifies the source content block when emitted from a
+	// partial-message stream. Same BlockID across multiple events means the
+	// consumer should UPDATE the existing entry in place (text growing as
+	// deltas arrive) instead of appending a new one. 0 means "untracked"
+	// (legacy whole-block path — always append).
+	BlockID int
 }
 
 // StreamingAgent extends Agent with live event streaming support.

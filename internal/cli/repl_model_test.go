@@ -96,6 +96,7 @@ func TestComputeSuggestionsHierarchy(t *testing.T) {
 		{name: "/config space shows subcommands", buffer: "/config ", wantNonZero: true, wantContain: ""},
 		{name: "/config set shows config keys", buffer: "/config set ", wantNonZero: true, wantContain: ""},
 		{name: "/model shows model subcommands", buffer: "/model ", wantNonZero: true, wantContain: ""},
+		{name: "/spec shows spec subcommands", buffer: "/spec ", wantNonZero: true, wantContain: ""},
 	}
 
 	for _, tc := range cases {

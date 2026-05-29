@@ -227,6 +227,69 @@ func RespecNoActiveTask() {
 	faint.Println("    Your next prompt will create a fresh task, which already runs the spec pre-turns.")
 }
 
+// SpecCompactNoActiveTask is shown when /spec compact is invoked without a
+// selected task.
+func SpecCompactNoActiveTask() {
+	boldYellow.Println("  /spec compact requires an active task.")
+	faint.Println("    Use /resume to select one, or start a task first.")
+}
+
+// SpecCompactAlreadyCompact is shown when the spec's Decisions log has
+// fewer entries than the keep threshold, so there is nothing to archive.
+func SpecCompactAlreadyCompact(threshold int) {
+	faint.Printf("  Spec already compact (≤ %d Decisions log entries).\n", threshold)
+}
+
+// SpecCompactCancelled is shown when the user declines the confirmation prompt.
+func SpecCompactCancelled() {
+	faint.Println("  Cancelled — spec.md unchanged.")
+}
+
+// SpecCompactDone is shown after a successful compact. bytesShrunk is positive
+// when the spec file is now smaller; archivePath is the file the middle entries
+// were appended to.
+func SpecCompactDone(removed int, archivePath string, bytesShrunk int) {
+	boldGreen.Printf("  ✓ Compacted spec.md — archived %d entries\n", removed)
+	if bytesShrunk > 0 {
+		faint.Printf("    spec.md shrank by %s\n", humanBytes(bytesShrunk))
+	}
+	faint.Printf("    archive: %s\n", archivePath)
+}
+
+// PromptSpecCompactConfirm asks the user to confirm a /spec compact. Returns
+// true on yes, false on no / Ctrl+C / selection error.
+func PromptSpecCompactConfirm(toArchive, keepFirst, keepLast int) bool {
+	prompt := promptui.Select{
+		Label: fmt.Sprintf("Compact spec.md (archive %d entries, keep first %d + last %d)?", toArchive, keepFirst, keepLast),
+		Items: []string{"Yes, compact", "No, cancel"},
+		Size:  2,
+		Templates: &promptui.SelectTemplates{
+			Label:    "  {{ . }}",
+			Active:   "  ▸ {{ . | cyan }}",
+			Inactive: "    {{ . | faint }}",
+			Selected: "  ✓ {{ . | green }}",
+		},
+		HideHelp: true,
+	}
+	idx, _, err := prompt.Run()
+	if err != nil {
+		return false
+	}
+	return idx == 0
+}
+
+// humanBytes formats a byte count like "12.4 KB" / "894 B".
+func humanBytes(n int) string {
+	switch {
+	case n >= 1024*1024:
+		return fmt.Sprintf("%.1f MB", float64(n)/(1024*1024))
+	case n >= 1024:
+		return fmt.Sprintf("%.1f KB", float64(n)/1024)
+	default:
+		return fmt.Sprintf("%d B", n)
+	}
+}
+
 // Warning prints a non-fatal warning line.
 func Warning(msg string) {
 	boldYellow.Printf("  ⚠  %s\n", msg)
@@ -295,6 +358,7 @@ func InteractiveHelp() {
 	fmt.Println("    /model beta unset            Clear Agent Beta's override (inherits global)")
 	fmt.Println("    /continue                    Continue the active task's relay loop")
 	fmt.Println("    /respec                      Force a spec pre-turn before the next prompt or /continue")
+	fmt.Println("    /spec compact                Trim active spec's Decisions log (archives middle entries)")
 	fmt.Println("    /resume                      Select a previous task (does not run it)")
 	fmt.Println("    /new                         Deselect current task (next prompt = new task)")
 	fmt.Println("    /exit, /quit                 Exit departai")

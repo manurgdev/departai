@@ -51,26 +51,29 @@ func RunAgentView(
 type phase int
 
 const (
-	phaseStreaming  phase = iota // agent is working
+	phaseStreaming phase = iota // agent is working
 	phaseCountdown              // agent done, counting down to auto-continue
 	phaseReview                 // user interrupted countdown, browsing events
 )
 
 type entry struct {
-	kind     string // "text" or "tool"
-	title    string // one-line display text
-	detail   string // expandable content (diff for Edit)
-	expanded bool
+	kind      string // "text" or "tool"
+	title     string // one-line display text
+	detail    string // expandable content (diff for Edit)
+	expanded  bool
+	inFlight  bool      // true while the tool call has not yet been followed by another event
+	startedAt time.Time // when this tool call was streamed (for the "(running Xs)" timer)
 }
 
 // Model is the bubbletea model for the agent turn view.
 type Model struct {
-	entries   []entry
-	toolIdx   []int // indices into entries that are tool entries (for cursor nav)
-	cursor    int   // position in toolIdx
-	phase     phase
-	viewport  viewport.Model
-	ready     bool // viewport initialised after first WindowSizeMsg
+	entries      []entry
+	toolIdx      []int       // indices into entries that are tool entries (for cursor nav)
+	blockToEntry map[int]int // partial-message BlockID → entry index (for dedup-on-update)
+	cursor       int         // position in toolIdx
+	phase        phase
+	viewport     viewport.Model
+	ready        bool // viewport initialised after first WindowSizeMsg
 
 	eventCh       <-chan agent.StreamEvent
 	agentName     string
@@ -79,11 +82,11 @@ type Model struct {
 	maxTurns      int
 	labelOverride string // when non-empty, replaces "Turn N" in the header
 	result        string
-	startTime   time.Time // when this turn started
-	elapsed     time.Duration
-	taskStart   time.Time // when the entire task started (across all turns)
-	cancelAgent context.CancelFunc
-	stopped     bool // true if user pressed ESC to stop
+	startTime     time.Time // when this turn started
+	elapsed       time.Duration
+	taskStart     time.Time // when the entire task started (across all turns)
+	cancelAgent   context.CancelFunc
+	stopped       bool // true if user pressed ESC to stop
 
 	countdownLeft time.Duration
 	spinnerFrame  int
@@ -112,6 +115,7 @@ func newModel(
 		cursor:        0,
 		startTime:     time.Now(),
 		taskStart:     taskStart,
+		blockToEntry:  map[int]int{},
 	}
 }
 
@@ -173,6 +177,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case channelClosedMsg:
 		m.elapsed = time.Since(m.startTime)
+		m.markAllToolsDone()
 		if m.stopped {
 			// User pressed ESC — exit immediately, no countdown.
 			m.rebuildContent()
@@ -190,6 +195,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.phase == phaseStreaming {
 			m.elapsed = time.Since(m.startTime)
 			m.spinnerFrame = (m.spinnerFrame + 1) % len(spinnerChars)
+			// Rebuild on every tick so in-flight tool entries refresh their
+			// spinner frame and "(running Xs)" timer. The viewport caches the
+			// content string set by rebuildContent — without this, only the
+			// header re-renders each View().
+			m.rebuildContent()
 			return m, elapsedTick()
 		}
 		return m, nil
@@ -292,17 +302,32 @@ func (m *Model) rebuildContent() {
 			// Tool calls are mechanical activity — render the marker as a
 			// scannable anchor, but fade the title so the eye lands on the
 			// agent's text first.
+			//
+			// In-flight (no event seen yet after this one): swap the static
+			// marker for a spinner frame and append a live timer. This makes
+			// long-running tool calls (especially `Agent` sub-agents that can
+			// sit silent for 10+ minutes) clearly distinguishable from a
+			// frozen UI.
 			isSelected := i == selectedEntryIdx
 			marker := "  ▸ "
-			indentCont := "    " // continuation lines align with title, not marker
+			displayTitle := e.title
+			if e.inFlight {
+				marker = "  " + spinnerChars[m.spinnerFrame] + " "
+				displayTitle = e.title + "  (running " + time.Since(e.startedAt).Round(time.Second).String() + ")"
+			}
+			indentCont := "    "            // continuation lines align with title, not marker
 			titleWrapWidth := wrapWidth - 2 // marker width
 			if titleWrapWidth < 20 {
 				titleWrapWidth = 20
 			}
-			titleWrapped := wrapAndIndent(e.title, titleWrapWidth, "", indentCont)
-			if isSelected {
+			titleWrapped := wrapAndIndent(displayTitle, titleWrapWidth, "", indentCont)
+			switch {
+			case isSelected:
 				b.WriteString(styleSelectedMarker.Render("  ▹ ") + styleSelectedTool.Render(titleWrapped) + "\n")
-			} else {
+			case e.inFlight:
+				// Cyan title (not faint) so the user's eye lands on the active call.
+				b.WriteString(styleBoldCyn.Render(marker) + styleCyan.Render(titleWrapped) + "\n")
+			default:
 				b.WriteString(styleBoldCyn.Render(marker) + styleFaint.Render(titleWrapped) + "\n")
 			}
 			if e.expanded && e.detail != "" {
@@ -329,21 +354,109 @@ func (m *Model) rebuildContent() {
 
 func (m *Model) addEvent(evt agent.StreamEvent) {
 	switch evt.Kind {
+	case "result":
+		m.result = evt.Result
+		m.markPrevToolDone()
+		return
+	case "block_end":
+		// Partial-message stream: the block with this BlockID just closed.
+		// Mark its entry as no longer in-flight without disturbing the rest.
+		if entryIdx, ok := m.blockToEntry[evt.BlockID]; ok && entryIdx < len(m.entries) {
+			m.entries[entryIdx].inFlight = false
+		}
+		return
+	}
+
+	// For text/tool/tool_start: settle whatever was previously in-flight
+	// and decide whether to update an existing entry (BlockID match) or
+	// append a fresh one.
+	m.markPrevToolDone()
+
+	switch evt.Kind {
 	case "text":
+		if evt.BlockID > 0 {
+			if entryIdx, ok := m.blockToEntry[evt.BlockID]; ok && entryIdx < len(m.entries) {
+				// Same text block — replace title with the grown content.
+				m.entries[entryIdx].title = evt.Text
+				m.entries[entryIdx].inFlight = true
+				return
+			}
+			// First event for this text block — append, register, mark in-flight.
+			m.entries = append(m.entries, entry{
+				kind:      "text",
+				title:     evt.Text,
+				inFlight:  true,
+				startedAt: time.Now(),
+			})
+			m.blockToEntry[evt.BlockID] = len(m.entries) - 1
+			return
+		}
+		// Legacy whole-block: append a settled text entry.
 		m.entries = append(m.entries, entry{kind: "text", title: evt.Text})
+
+	case "tool_start":
+		// Partial-message: a tool_use block opened. Detail is empty for now;
+		// the matching "tool" event will fill it in at content_block_stop.
+		m.entries = append(m.entries, entry{
+			kind:      "tool",
+			title:     evt.Tool,
+			inFlight:  true,
+			startedAt: time.Now(),
+		})
+		m.toolIdx = append(m.toolIdx, len(m.entries)-1)
+		if evt.BlockID > 0 {
+			m.blockToEntry[evt.BlockID] = len(m.entries) - 1
+		}
+
 	case "tool":
 		title := evt.Tool
 		if evt.Detail != "" {
 			title += " " + evt.Detail
 		}
+		if evt.BlockID > 0 {
+			if entryIdx, ok := m.blockToEntry[evt.BlockID]; ok && entryIdx < len(m.entries) {
+				// Finalize an entry created by an earlier tool_start.
+				m.entries[entryIdx].title = title
+				m.entries[entryIdx].detail = buildToolDetail(evt)
+				// Keep inFlight true — block_end will clear it.
+				return
+			}
+		}
+		// Legacy whole-block (no prior tool_start): append a new in-flight entry.
 		m.entries = append(m.entries, entry{
-			kind:   "tool",
-			title:  title,
-			detail: buildToolDetail(evt),
+			kind:      "tool",
+			title:     title,
+			detail:    buildToolDetail(evt),
+			inFlight:  true,
+			startedAt: time.Now(),
 		})
 		m.toolIdx = append(m.toolIdx, len(m.entries)-1)
-	case "result":
-		m.result = evt.Result
+		if evt.BlockID > 0 {
+			m.blockToEntry[evt.BlockID] = len(m.entries) - 1
+		}
+	}
+}
+
+// markPrevToolDone clears the in-flight flag on the most recent tool entry,
+// signalling that its result has now been observed. No-op if the last entry
+// is not a tool or was already settled.
+func (m *Model) markPrevToolDone() {
+	if len(m.entries) == 0 {
+		return
+	}
+	last := &m.entries[len(m.entries)-1]
+	if last.kind == "tool" && last.inFlight {
+		last.inFlight = false
+	}
+}
+
+// markAllToolsDone clears in-flight on every tool entry. Called when the
+// agent stream closes so no stale "(running ...)" timer survives.
+func (m *Model) markAllToolsDone() {
+	for i := range m.entries {
+		if m.entries[i].kind == "tool" && m.entries[i].inFlight {
+			m.entries[i].inFlight = false
+		}
 	}
 }
 
@@ -538,4 +651,3 @@ func formatDiff(old, new string) string {
 	}
 	return strings.TrimRight(b.String(), "\n")
 }
-

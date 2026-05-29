@@ -702,3 +702,328 @@ func TestSpecPathIsInsideTaskDir(t *testing.T) {
 		t.Errorf("spec path base = %q, want %q", got, want)
 	}
 }
+
+// ── CompactDecisionsLog ────────────────────────────────────────────────────
+
+// writeSpec replaces the spec file with the given content, bypassing the
+// initialize template. Used by compact tests to set up specific scenarios.
+func writeSpec(t *testing.T, tl *TaskLog, content string) {
+	t.Helper()
+	if err := os.WriteFile(tl.SpecPath(), []byte(content), 0644); err != nil {
+		t.Fatalf("writing spec: %v", err)
+	}
+}
+
+// makeBullets builds a slice of bullet entries "- entry-001", "- entry-002", ...
+func makeBullets(n int) []string {
+	out := make([]string, n)
+	for i := 0; i < n; i++ {
+		out[i] = fmt.Sprintf("- entry-%03d", i+1)
+	}
+	return out
+}
+
+// specWithDecisions returns a synthetic spec with the given decision bullets
+// inserted as the body of the Decisions log section.
+func specWithDecisions(bullets []string) string {
+	body := "(empty)"
+	if len(bullets) > 0 {
+		body = strings.Join(bullets, "\n")
+	}
+	return `# Spec
+
+**Task ID**: t1
+**Status**: ACTIVE
+**Last updated**: 2026-05-08
+
+## Goal
+
+Goal text.
+
+## Acceptance Criteria
+
+- [ ] crit one
+- [x] crit two
+
+## Files in scope
+
+- foo.go
+
+## Out of scope
+
+None
+
+## Open questions
+
+None
+
+## Decisions log
+
+` + body + "\n"
+}
+
+func TestCompactDecisionsLog_NoSection(t *testing.T) {
+	tl, err := New(t.TempDir(), "compact-test")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	// Spec without a Decisions log section at all.
+	writeSpec(t, tl, "# Spec\n\n**Status**: ACTIVE\n\n## Goal\n\nx\n")
+
+	removed, archive, err := tl.CompactDecisionsLog(3, 12)
+	if err != nil {
+		t.Fatalf("CompactDecisionsLog: %v", err)
+	}
+	if removed != 0 || archive != "" {
+		t.Errorf("noop expected, got removed=%d archive=%q", removed, archive)
+	}
+	if _, err := os.Stat(filepath.Join(tl.Dir, "spec-archive.md")); !os.IsNotExist(err) {
+		t.Errorf("archive file should not exist on noop, stat err = %v", err)
+	}
+}
+
+func TestCompactDecisionsLog_EmptyPlaceholder(t *testing.T) {
+	tl, err := New(t.TempDir(), "compact-test")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	// Initial spec already has `## Decisions log\n\n(empty)\n`.
+	original, err := tl.ReadSpec()
+	if err != nil {
+		t.Fatalf("ReadSpec: %v", err)
+	}
+
+	removed, archive, err := tl.CompactDecisionsLog(3, 12)
+	if err != nil {
+		t.Fatalf("CompactDecisionsLog: %v", err)
+	}
+	if removed != 0 || archive != "" {
+		t.Errorf("noop expected on (empty), got removed=%d archive=%q", removed, archive)
+	}
+	got, _ := tl.ReadSpec()
+	if got != original {
+		t.Errorf("spec was modified on noop")
+	}
+}
+
+func TestCompactDecisionsLog_BelowThreshold(t *testing.T) {
+	tl, err := New(t.TempDir(), "compact-test")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	bullets := makeBullets(15) // exactly at threshold (3+12)
+	writeSpec(t, tl, specWithDecisions(bullets))
+	original, _ := tl.ReadSpec()
+
+	removed, archive, err := tl.CompactDecisionsLog(3, 12)
+	if err != nil {
+		t.Fatalf("CompactDecisionsLog: %v", err)
+	}
+	if removed != 0 || archive != "" {
+		t.Errorf("noop expected at threshold, got removed=%d archive=%q", removed, archive)
+	}
+	got, _ := tl.ReadSpec()
+	if got != original {
+		t.Errorf("spec was modified at threshold")
+	}
+}
+
+func TestCompactDecisionsLog_AboveThreshold(t *testing.T) {
+	tl, err := New(t.TempDir(), "compact-test")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	bullets := makeBullets(20)
+	writeSpec(t, tl, specWithDecisions(bullets))
+
+	removed, archive, err := tl.CompactDecisionsLog(3, 12)
+	if err != nil {
+		t.Fatalf("CompactDecisionsLog: %v", err)
+	}
+	if removed != 5 {
+		t.Errorf("removed = %d, want 5", removed)
+	}
+	if archive == "" {
+		t.Errorf("archive path empty")
+	}
+
+	got, err := tl.ReadSpec()
+	if err != nil {
+		t.Fatalf("ReadSpec after compact: %v", err)
+	}
+
+	// Kept entries: first 3 + last 12.
+	for _, b := range bullets[:3] {
+		if !strings.Contains(got, b) {
+			t.Errorf("expected first bullet %q kept; spec was:\n%s", b, got)
+		}
+	}
+	for _, b := range bullets[8:] {
+		if !strings.Contains(got, b) {
+			t.Errorf("expected last bullet %q kept; spec was:\n%s", b, got)
+		}
+	}
+	// Archived entries: the middle 5.
+	for _, b := range bullets[3:8] {
+		if strings.Contains(got, b) {
+			t.Errorf("expected middle bullet %q removed from spec, still present", b)
+		}
+	}
+	// Archive marker present (blockquote, not a bullet — see CompactDecisionsLog).
+	if !strings.Contains(got, "> _5 entradas anteriores archivadas en spec-archive.md._") {
+		t.Errorf("expected archive marker in spec; got:\n%s", got)
+	}
+
+	// Other sections must be intact.
+	for _, want := range []string{"## Goal\n\nGoal text.", "- [ ] crit one", "- [x] crit two", "## Files in scope\n\n- foo.go"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("expected unrelated section %q preserved; spec was:\n%s", want, got)
+		}
+	}
+
+	// Archive file must contain the middle bullets and a Compacted-at header.
+	archiveData, err := os.ReadFile(archive)
+	if err != nil {
+		t.Fatalf("reading archive: %v", err)
+	}
+	archiveStr := string(archiveData)
+	if !strings.Contains(archiveStr, "## Compacted at ") {
+		t.Errorf("archive missing Compacted-at header; archive was:\n%s", archiveStr)
+	}
+	for _, b := range bullets[3:8] {
+		if !strings.Contains(archiveStr, b) {
+			t.Errorf("archive missing bullet %q; archive was:\n%s", b, archiveStr)
+		}
+	}
+}
+
+func TestCompactDecisionsLog_Idempotent(t *testing.T) {
+	tl, err := New(t.TempDir(), "compact-test")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	bullets := makeBullets(20)
+	writeSpec(t, tl, specWithDecisions(bullets))
+
+	removed1, _, err := tl.CompactDecisionsLog(3, 12)
+	if err != nil || removed1 != 5 {
+		t.Fatalf("first compact: removed=%d err=%v", removed1, err)
+	}
+
+	specAfter1, _ := tl.ReadSpec()
+
+	removed2, _, err := tl.CompactDecisionsLog(3, 12)
+	if err != nil {
+		t.Fatalf("second compact: %v", err)
+	}
+	if removed2 != 0 {
+		t.Errorf("second compact should be noop, got removed=%d", removed2)
+	}
+	specAfter2, _ := tl.ReadSpec()
+	if specAfter2 != specAfter1 {
+		t.Errorf("spec changed on idempotent compact")
+	}
+}
+
+func TestCompactDecisionsLog_ArchiveAppends(t *testing.T) {
+	tl, err := New(t.TempDir(), "compact-test")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	// First round: 20 entries → archive 5.
+	bullets1 := makeBullets(20)
+	writeSpec(t, tl, specWithDecisions(bullets1))
+	if _, _, err := tl.CompactDecisionsLog(3, 12); err != nil {
+		t.Fatalf("first compact: %v", err)
+	}
+
+	// Simulate more turns: now 30 entries (12 last from previous + 18 new).
+	allEntries := makeBullets(30)
+	writeSpec(t, tl, specWithDecisions(allEntries))
+	if _, _, err := tl.CompactDecisionsLog(3, 12); err != nil {
+		t.Fatalf("second compact: %v", err)
+	}
+
+	archiveData, err := os.ReadFile(filepath.Join(tl.Dir, "spec-archive.md"))
+	if err != nil {
+		t.Fatalf("reading archive: %v", err)
+	}
+	archiveStr := string(archiveData)
+
+	// Archive must contain TWO Compacted-at headers (one per compact run).
+	if got := strings.Count(archiveStr, "## Compacted at "); got != 2 {
+		t.Errorf("archive should have 2 Compacted-at headers, got %d; archive was:\n%s", got, archiveStr)
+	}
+	// First archive run: middle of bullets1[3:8].
+	for _, b := range bullets1[3:8] {
+		if !strings.Contains(archiveStr, b) {
+			t.Errorf("archive missing first-run bullet %q", b)
+		}
+	}
+}
+
+func TestCompactDecisionsLog_PreservesOtherSections(t *testing.T) {
+	tl, err := New(t.TempDir(), "compact-test")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	// Build a spec where Decisions log is in the MIDDLE of the file (not last
+	// section) to verify byte-precise preservation of trailing content.
+	bullets := makeBullets(20)
+	bulletsBody := strings.Join(bullets, "\n")
+	custom := `# Spec
+
+**Status**: ACTIVE
+
+## Goal
+
+Goal text here.
+
+## Decisions log
+
+` + bulletsBody + `
+
+## Open questions
+
+A trailing section that must be preserved exactly.
+`
+	writeSpec(t, tl, custom)
+
+	if _, _, err := tl.CompactDecisionsLog(3, 12); err != nil {
+		t.Fatalf("CompactDecisionsLog: %v", err)
+	}
+
+	got, _ := tl.ReadSpec()
+	// The Open questions trailer must be present and unchanged.
+	want := "## Open questions\n\nA trailing section that must be preserved exactly.\n"
+	if !strings.Contains(got, want) {
+		t.Errorf("trailing section corrupted; spec was:\n%s", got)
+	}
+	// The Goal section must be present and unchanged.
+	if !strings.Contains(got, "## Goal\n\nGoal text here.") {
+		t.Errorf("Goal section corrupted; spec was:\n%s", got)
+	}
+}
+
+func TestCompactDecisionsLog_BadArgs(t *testing.T) {
+	tl, err := New(t.TempDir(), "compact-test")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	if _, _, err := tl.CompactDecisionsLog(0, 12); err == nil {
+		t.Errorf("expected error for keepFirst=0")
+	}
+	if _, _, err := tl.CompactDecisionsLog(3, 0); err == nil {
+		t.Errorf("expected error for keepLast=0")
+	}
+	if _, _, err := tl.CompactDecisionsLog(-1, 12); err == nil {
+		t.Errorf("expected error for negative keepFirst")
+	}
+}

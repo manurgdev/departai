@@ -361,6 +361,9 @@ func (m *replModel) computeSuggestions() (items []suggestion, wordFrom, wordTo i
 
 	case strings.HasPrefix(textBefore, "/model "):
 		return filterByPrefix(modelSubcommands, word), wstart, wend
+
+	case strings.HasPrefix(textBefore, "/spec "):
+		return filterByPrefix(specSubcommands, word), wstart, wend
 	}
 
 	// Top-level: match the entire textBefore (which always starts with `/`)

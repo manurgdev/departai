@@ -141,6 +141,8 @@ While agents work, departai shows a **bubbletea TUI** (alt-screen) with:
 
 - **Pinned header** — turn number, agent name, model, elapsed time (always visible)
 - **Live event stream** — agent reasoning text + tool calls as they happen
+- **Token-level text streaming** (Claude backend) — text from the agent appears live, character by character, as the LLM generates it. Long generations (e.g. writing an updated spec.md) no longer surface as a silent gap.
+- **In-flight indicators** — each tool call shows a spinner and a `(running Xs)` timer while the block is open, so you can tell when an agent is actively working on something vs. when a step has settled.
 - **Spinner + total elapsed** in the footer
 - **Auto-continue** — when a turn finishes, a 5-second countdown starts. Press any key to enter review mode, or wait to auto-continue to the next turn.
 
@@ -622,7 +624,9 @@ departai/
     │   ├── agent.go            # Agent, StreamingAgent, StreamEvent interfaces
     │   ├── claude/
     │   │   ├── claude.go       # Claude Code CLI implementation + model validation
-    │   │   └── stream.go       # Claude stream-json parser
+    │   │   ├── stream.go       # stream-json parser (stateful Parser for partial-message
+    │   │   │                   # deltas + stateless ParseStreamLine fallback for legacy)
+    │   │   └── stream_test.go  # parser tests (legacy + partial-message paths)
     │   └── codex/
     │       ├── codex.go        # Codex CLI implementation + model validation
     │       └── stream.go       # Codex JSONL parser
@@ -667,7 +671,9 @@ Then add a case to `buildAgents()` in `orchestrator.go` and select it with `--ba
 
 | Backend | CLI | Auto-approve flag | Output format |
 |---------|-----|-------------------|---------------|
-| `claude` | `claude -p <prompt>` | `--dangerously-skip-permissions` | `--output-format stream-json` |
+| `claude` | `claude -p <prompt>` | `--dangerously-skip-permissions` | `--output-format stream-json --include-partial-messages` |
 | `codex` | `codex exec <prompt>` | `--dangerously-bypass-approvals-and-sandbox` | `--json` (JSONL) |
 
 Both backends implement the `agent.StreamingAgent` interface, providing live tool-call streaming via the bubbletea TUI. Model validation is backend-specific — each backend's `ValidateModel` function runs a minimal test prompt to verify the model name is accepted.
+
+The Claude backend uses `--include-partial-messages` to receive token-level deltas (`stream_event` lines with `content_block_start` / `content_block_delta` / `content_block_stop` sub-events). The parser is stateful: it accumulates deltas per content block and emits `agent.StreamEvent`s carrying a `BlockID` so the TUI can update the same entry in place as text grows. This eliminates the "silent gap" the TUI used to show when the LLM generated a single large block (e.g. a `Write` of an 80 KB spec). The Codex backend continues to emit whole-block events; if a future Codex release adds a partial-stream mode, the same pattern can be applied.

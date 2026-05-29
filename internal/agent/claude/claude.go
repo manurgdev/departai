@@ -45,6 +45,12 @@ func (a *Agent) RunTurn(ctx context.Context, workDir string, prompt string) (age
 		"--dangerously-skip-permissions",
 		"--verbose",
 		"--output-format", "stream-json",
+		// Stream token-level deltas (text and tool input). Without this, the
+		// CLI emits only whole `assistant` messages — long single blocks
+		// (e.g. a Write of a 80 KB spec) would surface to departai as one
+		// silent gap of many minutes. With deltas the TUI can show text
+		// growing live and confirm the agent is alive.
+		"--include-partial-messages",
 		"-p", prompt,
 	}
 	if a.model != "" {
@@ -74,13 +80,17 @@ func (a *Agent) RunTurn(ctx context.Context, workDir string, prompt string) (age
 	scanner := bufio.NewScanner(stdoutPipe)
 	scanner.Buffer(make([]byte, 0, 1024*1024), 1024*1024)
 
+	parser := NewParser()
 	for scanner.Scan() {
 		line := scanner.Bytes()
 
-		events := ParseStreamLine(line)
+		events := parser.Parse(line)
 		for _, evt := range events {
 			switch evt.Kind {
 			case "tool":
+				// Finalized tool call — record for activity log. The earlier
+				// "tool_start" placeholder is intentionally ignored here;
+				// it has no Detail yet.
 				entry := evt.Tool
 				if evt.Detail != "" {
 					entry += " " + evt.Detail
