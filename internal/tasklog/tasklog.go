@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 const (
@@ -22,6 +23,11 @@ type TaskLog struct {
 	TaskID string
 	Dir    string // absolute path to the task directory
 	Prompt string
+
+	// Recovered holds non-fatal recovery notes produced by Load when it had to
+	// repair a corrupt task log. Empty on a clean load. The caller (orchestrator)
+	// surfaces these to the user so they know the original was backed up.
+	Recovered []string
 }
 
 // New creates the task directory under baseDir/.departai/tasks/<taskID>
@@ -63,20 +69,107 @@ func Load(taskDir string) (*TaskLog, error) {
 	if err != nil {
 		return nil, fmt.Errorf("reading task log %s: %w", logPath, err)
 	}
-
-	prompt := extractPrompt(string(data))
+	content := string(data)
 
 	tl := &TaskLog{
 		TaskID: taskID,
 		Dir:    taskDir,
-		Prompt: prompt,
 	}
+
+	// Integrity check: if the log is malformed (truncated header, lost
+	// Original Task, invalid UTF-8), back up the original and rebuild a usable
+	// version instead of proceeding with garbage or failing opaquely.
+	if note, repaired, rerr := tl.recoverIfCorrupt(content); rerr != nil {
+		return nil, rerr
+	} else if repaired {
+		tl.Recovered = append(tl.Recovered, note)
+		if data, err = os.ReadFile(logPath); err != nil {
+			return nil, fmt.Errorf("re-reading recovered task log %s: %w", logPath, err)
+		}
+		content = string(data)
+	}
+
+	tl.Prompt = extractPrompt(content)
 
 	if err := tl.initializeSpec(); err != nil {
 		return nil, fmt.Errorf("initializing spec on load: %w", err)
 	}
 
 	return tl, nil
+}
+
+// logLooksValid reports whether content has the minimal structure of a healthy
+// task log: valid UTF-8, the `# Task Log` header, and an extractable
+// `## Original Task` section.
+func logLooksValid(content string) bool {
+	if !utf8.ValidString(content) {
+		return false
+	}
+	if !strings.Contains(content, "# Task Log") {
+		return false
+	}
+	return extractPrompt(content) != "(unknown)"
+}
+
+// recoverableSectionRe finds the first preservable section (a turn entry or a
+// user directive) so rebuildLog can keep the real work while replacing a
+// damaged header.
+var recoverableSectionRe = regexp.MustCompile(`(?m)^## (?:Turn \d+|User Directive)\b`)
+
+// recoverIfCorrupt validates content and, when malformed, backs up the original
+// to <log>.corrupt-<timestamp> and rewrites a usable log in place. Returns a
+// human-readable note and repaired=true when recovery happened.
+func (tl *TaskLog) recoverIfCorrupt(content string) (note string, repaired bool, err error) {
+	if logLooksValid(content) {
+		return "", false, nil
+	}
+
+	logPath := tl.Path()
+	backup := fmt.Sprintf("%s.corrupt-%s", logPath, time.Now().Format("20060102-150405"))
+	if werr := os.WriteFile(backup, []byte(content), 0644); werr != nil {
+		return "", false, fmt.Errorf("backing up corrupt task log: %w", werr)
+	}
+
+	if werr := os.WriteFile(logPath, []byte(tl.rebuildLog(content)), 0644); werr != nil {
+		return "", false, fmt.Errorf("writing recovered task log: %w", werr)
+	}
+
+	note = fmt.Sprintf(
+		"task log %q was malformed; recovered a usable version (original backed up to %s)",
+		logFileName, filepath.Base(backup),
+	)
+	return note, true, nil
+}
+
+// rebuildLog produces a structurally valid task log: a fresh header (preserving
+// the original prompt when still extractable) followed by any recoverable turn
+// and directive sections, verbatim.
+func (tl *TaskLog) rebuildLog(content string) string {
+	prompt := extractPrompt(content)
+	if prompt == "(unknown)" {
+		prompt = "(original task description was lost to corruption; see the .corrupt backup)"
+	}
+
+	var b strings.Builder
+	fmt.Fprintf(&b, `# Task Log
+
+**Task ID**: %s
+**Started**: %s
+
+## Original Task
+
+%s
+
+---
+
+`, tl.TaskID, time.Now().Format("2006-01-02 15:04:05"), prompt)
+
+	if loc := recoverableSectionRe.FindStringIndex(content); loc != nil {
+		b.WriteString(strings.TrimRight(content[loc[0]:], "\n"))
+		b.WriteString("\n")
+	}
+
+	return b.String()
 }
 
 // promptRe extracts text between "## Original Task" and the next "---".

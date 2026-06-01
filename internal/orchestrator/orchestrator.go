@@ -719,6 +719,12 @@ func NewFromExisting(cfg Config, taskDir string) (*Orchestrator, error) {
 		return nil, fmt.Errorf("loading existing task: %w", err)
 	}
 
+	// Surface any non-fatal recovery from a corrupt task log so the user knows
+	// the original was backed up and a repaired version is in use.
+	for _, note := range tl.Recovered {
+		ui.Warning(note)
+	}
+
 	// Use the prompt from the existing task log.
 	cfg.Prompt = tl.Prompt
 
