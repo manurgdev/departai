@@ -2,9 +2,13 @@
 package agent
 
 import (
+	"bufio"
 	"context"
+	"errors"
 	"fmt"
+	"os"
 	"os/exec"
+	"strconv"
 )
 
 // CheckCLI returns an actionable error when the named CLI binary is not found
@@ -16,6 +20,49 @@ func CheckCLI(binary, installHint string) error {
 		return fmt.Errorf("the %q CLI is not installed or not on your PATH.\n%s", binary, installHint)
 	}
 	return nil
+}
+
+// ── stream buffer sizing ─────────────────────────────────────────────────────
+
+// defaultMaxStreamLineMB is the per-line cap for backend JSONL output. A single
+// stream line can be large (e.g. a tool_use input embedding a whole file), so
+// the default is generous. Override with DEPARTAI_MAX_STREAM_LINE_MB.
+const defaultMaxStreamLineMB = 16
+
+// streamBufferEnvVar lets advanced users raise the per-line cap without a
+// rebuild, for pathological outputs.
+const streamBufferEnvVar = "DEPARTAI_MAX_STREAM_LINE_MB"
+
+// StreamBufferMB returns the effective per-line cap in megabytes: the default,
+// or a positive integer from DEPARTAI_MAX_STREAM_LINE_MB.
+func StreamBufferMB() int {
+	if v := os.Getenv(streamBufferEnvVar); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return n
+		}
+	}
+	return defaultMaxStreamLineMB
+}
+
+// StreamBufferBytes returns the per-line cap in bytes, for bufio.Scanner.Buffer.
+func StreamBufferBytes() int {
+	return StreamBufferMB() * 1024 * 1024
+}
+
+// StreamReadError wraps a bufio.Scanner error with an actionable message. The
+// "line too long" case gets a specific hint pointing at the env-var override;
+// other read errors are wrapped verbatim. Returns nil for a nil error.
+func StreamReadError(agentName string, err error) error {
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, bufio.ErrTooLong) {
+		return fmt.Errorf(
+			"agent %q: a single output line exceeded the %d MB stream buffer — raise %s or simplify the task",
+			agentName, StreamBufferMB(), streamBufferEnvVar,
+		)
+	}
+	return fmt.Errorf("agent %q: reading stream output: %w", agentName, err)
 }
 
 // TurnResult holds the output from a single agent turn.

@@ -25,7 +25,7 @@ The product is solid as a personal tool; a paying customer has far less toleranc
 - [x] ~~**Clear error on missing/old backend CLI**~~ — **DONE**. `agent.CheckCLI` + per-backend `EnsureAvailable()`/`InstallHint`. `cli.Run` checks the configured backends up front (fatal in direct mode, warning in the REPL); `RunTurn` also maps `exec.ErrNotFound` to the actionable install hint as a safety net.
 - [x] ~~**Graceful corrupt-task-log recovery**~~ — **DONE**. `Load` runs an integrity check (`logLooksValid`: valid UTF-8 + `# Task Log` header + extractable Original Task). On corruption it backs up the original to `task-log.md.corrupt-<ts>` and rebuilds a usable log (fresh header preserving the extractable prompt + recoverable turn/directive sections verbatim), recording a note in `TaskLog.Recovered` that the orchestrator surfaces as a warning. Never crashes, never proceeds on garbage.
 - [x] ~~**Network/API failure retry**~~ — **DONE**. Transient backend failures (rate limit, 429/529, 5xx, network blips) retry the whole turn with exponential backoff + jitter; permanent failures (bad model, auth, missing CLI, cancelled context) abort immediately. Configurable via `max_retries` / `--max-retries` / `/config set max-retries` (default 2, 0 disables). `isTransientError` is a pure heuristic over the exit error + stderr; a `sleep` seam keeps the retry loop testable.
-- [ ] **Stream buffer tuning** — don't truncate on large prompts/verbose turns (1MB scanner limit).
+- [x] ~~**Stream buffer tuning**~~ — **DONE**. Per-line scanner cap raised 1 MB → 16 MB default, overridable via `DEPARTAI_MAX_STREAM_LINE_MB`. Both backends now check `scanner.Err()` (previously swallowed): on overflow they kill the process (avoiding a pipe-full deadlock) and return an actionable error instead of truncating the turn silently. Shared helpers `agent.StreamBufferBytes`/`StreamReadError`.
 - [ ] **Context-window awareness** — warn before an agent hits its limit.
 - [ ] **Orchestrator + codex package tests + E2E smoke** — the test confidence needed to ship and refactor safely.
 - [ ] **First-run onboarding** — detect installed backends, guide the user through config, fail clearly if nothing is available.
@@ -156,7 +156,7 @@ The current `blocked_commands` config is **soft enforcement** (prompt-injected).
 
 - [x] ~~**Graceful handling of corrupt task log**~~ — **DONE**. See Phase 1 — `Load` backs up + rebuilds a malformed log and warns, preserving recoverable turns.
 - [x] ~~**Better error messages on missing CLI**~~ — **DONE**. `agent.CheckCLI` + per-backend `EnsureAvailable()`; proactive check in `cli.Run` and `exec.ErrNotFound` mapping in `RunTurn` surface a clear "Install with `npm install -g …`" message.
-- [ ] **Stream buffering tuning** — large prompts or very verbose turns may hit the 1MB scanner buffer. Make it configurable or larger.
+- [x] ~~**Stream buffering tuning**~~ — **DONE**. See Phase 1 — 16 MB default, `DEPARTAI_MAX_STREAM_LINE_MB` override, and `scanner.Err()` now surfaced instead of swallowed.
 - [ ] **Context window awareness** — detect when an agent is approaching its context limit and log a warning.
 - [x] ~~**Handle network/API failures**~~ — **DONE**. See Phase 1 — transient-error retry with backoff, configurable via `max_retries`.
 - [x] ~~**Migrate from `c-bata/go-prompt` to a maintained input library**~~ — **DONE**. Migrated to `knz/bubbline` (bubbletea-based, multi-line editing, persistent history, smart Up/Down at line boundaries). Eliminated the panic class (no zombie goroutines) and added multi-line input wrap.

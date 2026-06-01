@@ -89,7 +89,7 @@ func (a *Agent) RunTurn(ctx context.Context, workDir string, prompt string) (age
 	)
 
 	scanner := bufio.NewScanner(stdoutPipe)
-	scanner.Buffer(make([]byte, 0, 1024*1024), 1024*1024)
+	scanner.Buffer(make([]byte, 0, 64*1024), agent.StreamBufferBytes())
 
 	for scanner.Scan() {
 		line := scanner.Bytes()
@@ -118,11 +118,27 @@ func (a *Agent) RunTurn(ctx context.Context, workDir string, prompt string) (age
 		}
 	}
 
+	// Surface a swallowed scanner error (e.g. bufio.ErrTooLong on an oversized
+	// line) instead of silently truncating the turn. Kill the process first so
+	// cmd.Wait doesn't block on a now-unread pipe.
+	scanErr := scanner.Err()
+	if scanErr != nil && cmd.Process != nil {
+		_ = cmd.Process.Kill()
+	}
+
 	if a.onStreamDone != nil {
 		a.onStreamDone()
 	}
 
 	waitErr := cmd.Wait()
+
+	if scanErr != nil {
+		return agent.TurnResult{
+			Output:   lastMessage,
+			Stderr:   stderr.String(),
+			Activity: activity,
+		}, agent.StreamReadError(a.name, scanErr)
+	}
 
 	if waitErr != nil {
 		errMsg := stderr.String()
