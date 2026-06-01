@@ -14,6 +14,7 @@ import (
 	codexagent "github.com/manurgdev/departai/internal/agent/codex"
 	"github.com/manurgdev/departai/internal/config"
 	"github.com/manurgdev/departai/internal/ui"
+	"github.com/manurgdev/departai/internal/version"
 )
 
 const usage = `departai — AI agent orchestrator
@@ -56,12 +57,23 @@ func Run(args []string) error {
 	logWindowFlag := fs.Int("log-window", 0, "Inject only the last N turns into each prompt (default: 0 = full log)")
 	modelFlag := fs.String("model", "", "Model to use (e.g. claude-opus-4-5); overrides config")
 	backendFlag := fs.String("backend", "", "Agent backend to use (default: claude)")
+	versionFlag := fs.Bool("version", false, "Print version, then exit (add --verbose for build details)")
+	verboseFlag := fs.Bool("verbose", false, "More detailed output (e.g. full build info with --version)")
 
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return nil
 		}
 		return err
+	}
+
+	if *versionFlag {
+		if *verboseFlag {
+			fmt.Println(version.Detailed())
+		} else {
+			fmt.Println(version.Summary())
+		}
+		return nil
 	}
 
 	// Resolve working directory first — config search depends on it.
@@ -103,6 +115,16 @@ func Run(args []string) error {
 	if *backendFlag != "" {
 		cfg.AgentBackend = *backendFlag
 	}
+
+	// Verify the configured backends' CLIs are installed before doing anything
+	// that needs them (model validation below, running a task). In direct mode
+	// a missing CLI is fatal; in interactive mode it's a warning, since the user
+	// can switch backends from the REPL.
+	directMode := fs.NArg() > 0
+	if err := ensureBackendsAvailable(cfg, directMode); err != nil {
+		return err
+	}
+
 	if *modelFlag != "" {
 		// Validate the CLI-provided model against the active backend.
 		var valErr error
@@ -127,4 +149,33 @@ func Run(args []string) error {
 	prompt := strings.Join(fs.Args(), " ")
 	_, err = runTask(workDir, cfg, prompt, false)
 	return err
+}
+
+// ensureBackendsAvailable checks that the CLI for every backend in use (the
+// per-agent backends resolved from config) is installed. When fatal is true, a
+// missing CLI returns an error; otherwise it surfaces a warning and continues.
+func ensureBackendsAvailable(cfg config.Config, fatal bool) error {
+	checked := map[string]bool{}
+	for _, agentName := range []string{"alpha", "beta"} {
+		backend := cfg.BackendFor(agentName)
+		if checked[backend] {
+			continue
+		}
+		checked[backend] = true
+
+		var err error
+		switch backend {
+		case "codex":
+			err = codexagent.EnsureAvailable()
+		default: // "claude" or empty
+			err = claudeagent.EnsureAvailable()
+		}
+		if err != nil {
+			if fatal {
+				return err
+			}
+			ui.Warning(err.Error())
+		}
+	}
+	return nil
 }

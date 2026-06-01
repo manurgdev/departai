@@ -5,6 +5,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os/exec"
 	"strings"
@@ -12,6 +13,18 @@ import (
 
 	"github.com/manurgdev/departai/internal/agent"
 )
+
+// CLI binary name and install hint — exported for proactive availability checks
+// and actionable "not installed" error messages.
+const (
+	BinaryName  = "claude"
+	InstallHint = "Install the Claude Code CLI: npm install -g @anthropic-ai/claude-code"
+)
+
+// EnsureAvailable returns an actionable error if the claude CLI is not on PATH.
+func EnsureAvailable() error {
+	return agent.CheckCLI(BinaryName, InstallHint)
+}
 
 // Agent runs turns by spawning the `claude` CLI process in non-interactive mode.
 type Agent struct {
@@ -57,7 +70,7 @@ func (a *Agent) RunTurn(ctx context.Context, workDir string, prompt string) (age
 		args = append(args, "--model", a.model)
 	}
 
-	cmd := exec.CommandContext(ctx, "claude", args...)
+	cmd := exec.CommandContext(ctx, BinaryName, args...)
 	cmd.Dir = workDir
 
 	stdoutPipe, err := cmd.StdoutPipe()
@@ -69,6 +82,9 @@ func (a *Agent) RunTurn(ctx context.Context, workDir string, prompt string) (age
 	cmd.Stderr = &stderr
 
 	if err := cmd.Start(); err != nil {
+		if errors.Is(err, exec.ErrNotFound) {
+			return agent.TurnResult{}, fmt.Errorf("agent %q: %s", a.name, InstallHint)
+		}
 		return agent.TurnResult{}, fmt.Errorf("agent %q: starting process: %w", a.name, err)
 	}
 

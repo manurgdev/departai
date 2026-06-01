@@ -1,7 +1,22 @@
 // Package agent defines the interface for AI coding agent backends.
 package agent
 
-import "context"
+import (
+	"context"
+	"fmt"
+	"os/exec"
+)
+
+// CheckCLI returns an actionable error when the named CLI binary is not found
+// on the user's PATH. installHint should tell the user how to install it.
+// Backends use this for a proactive availability check before running a turn,
+// so users see a clear "install with …" message instead of a raw exec error.
+func CheckCLI(binary, installHint string) error {
+	if _, err := exec.LookPath(binary); err != nil {
+		return fmt.Errorf("the %q CLI is not installed or not on your PATH.\n%s", binary, installHint)
+	}
+	return nil
+}
 
 // TurnResult holds the output from a single agent turn.
 type TurnResult struct {

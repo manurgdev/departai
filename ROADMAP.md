@@ -1,6 +1,85 @@
 # DepartAI Roadmap
 
-Pending work compiled from the conversation history, categorized by theme. Not strict priorities — pick what matches the moment.
+DepartAI is moving from a personal CLI tool to a **commercial product sold to third parties**. This roadmap has two layers:
+
+1. **Go-to-market** — the phased path to a sellable product (below). This is the priority spine.
+2. **Feature backlog** — the thematic list of capabilities, picked opportunistically as they fit a phase or a customer need.
+
+---
+
+## 🚀 Go-to-market
+
+### Business model (decided)
+
+- **Per-user perpetual license.** One-time payment, unlimited use afterward. License is bound to a registered user account (registration required).
+- **Team licenses.** Bulk licenses for companies at a reduced per-seat price.
+- **Device limit: 2 per license.** Usage is capped to 2 activated devices. Enforced via a signature derived from `user + device fingerprint`.
+
+> **Architectural consequence:** a 2-device cap cannot be enforced purely offline — a server must track how many devices a user has activated. The model is therefore **"online activation, offline use"**: the client computes a device fingerprint and activates against a license server, which checks the device count, registers the device, and returns a **cryptographically signed license**. The client ships only the public key, verifies the signature locally, runs offline, and periodically re-validates (e.g. every N days) to honor revocations and plan changes. This drags in: accounts backend + payment gateway + license server + binary signing.
+
+### Phase 1 — Product hardening (current focus)
+
+The product is solid as a personal tool; a paying customer has far less tolerance for rough edges. Goal: make it boringly reliable and self-explanatory before anyone pays for it. (Detailed items live in the thematic backlog below — this is the curated phase checklist.)
+
+- [x] ~~**`--version` flag**~~ — **DONE**. `internal/version` resolves version/commit/date from ldflags (GoReleaser-ready) with a `runtime/debug.ReadBuildInfo` fallback. Closed-source-aware output: `--version` prints a clean one-liner (`departai vX.Y.Z (os/arch)`), while internal metadata (commit, build date, Go toolchain) is gated behind `--version --verbose` for support/diagnostics only.
+- [x] ~~**Clear error on missing/old backend CLI**~~ — **DONE**. `agent.CheckCLI` + per-backend `EnsureAvailable()`/`InstallHint`. `cli.Run` checks the configured backends up front (fatal in direct mode, warning in the REPL); `RunTurn` also maps `exec.ErrNotFound` to the actionable install hint as a safety net.
+- [ ] **Graceful corrupt-task-log recovery** — never crash on malformed markdown; skip + warn.
+- [ ] **Network/API failure retry** — survive transient backend CLI errors instead of failing the turn.
+- [ ] **Stream buffer tuning** — don't truncate on large prompts/verbose turns (1MB scanner limit).
+- [ ] **Context-window awareness** — warn before an agent hits its limit.
+- [ ] **Orchestrator + codex package tests + E2E smoke** — the test confidence needed to ship and refactor safely.
+- [ ] **First-run onboarding** — detect installed backends, guide the user through config, fail clearly if nothing is available.
+- [ ] **`--verbose` / `--debug` flag** — dump full prompts; essential for diagnosing customer issues.
+
+### Phase 2 — Distribution & packaging (signed binaries)
+
+Selling to third parties means they can't `go build` from a public repo. They download a signed artifact.
+
+- [ ] **Private release pipeline** — GitHub Actions builds tagged releases; artifacts are NOT public `go install`. Decide hosting (private GH releases, own download server, gated CDN).
+- [ ] **GoReleaser** — reproducible cross-platform binaries (macOS arm64/amd64, Linux, Windows).
+- [ ] **macOS code signing + notarization** — without this, Gatekeeper blocks the app on customer machines. Requires an Apple Developer account + signing cert in CI.
+- [ ] **Windows code signing** — Authenticode cert to avoid SmartScreen warnings (if Windows is a target).
+- [ ] **Auto-update mechanism** — check for + install updates, since there's no Homebrew/package-manager channel for private software.
+- [ ] **Versioning & changelog discipline** — semver, signed tags, customer-facing release notes.
+
+### Phase 3 — Licensing & commercial backend
+
+Lives in a **separate `departai-web` project** (not this repo): backend (accounts, payments, license server), landing page, pricing + checkout, public documentation, and user dashboards (devices + license management). This repo (the CLI) only ships the client-side license verification that talks to that backend.
+
+The "online activation, offline use" machinery described above.
+
+- [ ] **Accounts backend** — user registration, auth, license records, team/seat management.
+- [ ] **Payment integration** — one-time purchase + team purchases (Stripe or similar); webhooks issue licenses.
+- [ ] **License server** — issues signed licenses, tracks device activations, enforces the 2-device cap, handles deactivation/transfer, supports revocation.
+- [ ] **Device fingerprinting** — stable `user + device` signature that survives reboots but distinguishes machines. Decide inputs (hardware IDs, OS install ID) and privacy posture.
+- [ ] **Client-side license verification** — embed public key, verify signed license offline, periodic re-validation, grace period for offline use, clear UX when over the device limit or expired.
+- [ ] **Team admin** — seat assignment, member management, reduced bulk pricing tiers.
+- [ ] **Trial / activation flow** — how a new user goes from download → register → pay → activate, ideally without friction.
+
+### Phase 4 — Legal, support & GTM polish
+
+Mostly delivered through **`departai-web`** (landing, pricing, docs site, support) — listed here for completeness.
+
+- [ ] **EULA / terms of service** — commercial license terms, liability, acceptable use.
+- [ ] **Privacy policy** — especially around device fingerprinting + any telemetry (GDPR if selling in EU).
+- [ ] **Opt-in telemetry** — anonymous usage/error reporting with explicit consent, for product decisions + support.
+- [ ] **Support channel** — issue intake, docs site, troubleshooting FAQ (see Documentation backlog).
+- [ ] **Marketing surface** — landing page, pricing page, demo, purchase funnel (in `departai-web`).
+- [ ] **Branding pass** — finalize name/identity; the README still advertises open `go install`, which contradicts the commercial model and must change.
+
+### Open questions / decisions pending
+
+- **Platforms at launch** — macOS only first, or macOS + Linux + Windows? Drives signing + testing scope.
+- **Backend CLI dependency** — DepartAI requires the customer to have `claude`/`codex` installed and authenticated (their own LLM subscription). Is that acceptable for the target buyer, or does the product need to abstract/bundle that? Big positioning question.
+- **Pricing numbers** — single-license price, team tier discount curve.
+- **License server hosting** — managed (Vercel/Fly/Railway) vs self-hosted; cost vs control. Decided in `departai-web`.
+- ~~**Where the accounts/payment/license stack lives**~~ — **DECIDED**: a separate `departai-web` project holds backend (accounts, payments, license server), landing, pricing/checkout, docs, and user dashboards. The CLI only ships client-side license verification. `departai-web` needs its own roadmap once Phase 1 is underway.
+
+---
+
+## Feature backlog (general)
+
+The thematic list below predates the commercial pivot. Items feed into the phases above (e.g. testing items → Phase 1, distribution items → Phase 2) or remain optional capabilities picked when they fit a customer need.
 
 ## Core features (explicitly mentioned)
 
@@ -52,15 +131,17 @@ Possible future modes (each with its own protocol):
 - [ ] **Homebrew formula** — `brew install departai`.
 - [ ] **Shell completions** — bash/zsh/fish completions for `--dir`, `--model`, `--backend`, etc.
 - [ ] **Man page** — `man departai` with full flag documentation.
-- [ ] **`--verbose` / `--debug` flag** — dump the full prompt sent to each agent for debugging (currently only in raw logs).
-- [ ] **`--version` flag** — print version + build info.
+- [ ] **`--verbose` / `--debug` flag** — the `--verbose` flag exists (currently it only expands `--version` into full build info). Still TODO: have `--verbose`/`--debug` dump the full prompt sent to each agent for debugging (currently only in raw logs).
+- [x] ~~**`--version` flag**~~ — **DONE**. See Phase 1 / `internal/version`.
 
 ## Testing
 
-- [ ] **tasklog package tests** — turn parsing, AppendUserDirective, Load, ListTasks, Relocate.
-- [ ] **orchestrator package tests** — buildAgents with different backend combos, consensus logic, turn counting.
-- [ ] **codex package tests** — stream parsing, command unwrapping, ValidateModel (skip if codex CLI unavailable).
-- [ ] **End-to-end smoke test** — spin up a fake backend, verify full turn flow.
+All four testing items are now **DONE** — the package coverage needed to refactor Phase 1 safely is in place (tasklog 77%, orchestrator 60%, codex 55%, claude 57%).
+
+- [x] ~~**tasklog package tests**~~ — **DONE**. Existing `tasklog_test.go` (spec primitives, windowing, scope, compaction, relocate-safety) extended with `tasklog_more_test.go`: `AppendUserDirective`, `Load` (prompt + turns), `ListTasks` (ordering, summaries, skips non-task dirs), `BothAgentsAgreeComplete`, `ParseLastWorkingDir`, `Relocate` (happy path + no-op), `CountSpecDecisions`.
+- [x] ~~**orchestrator package tests**~~ — **DONE**. `orchestrator_test.go` covers pure helpers (`setOverlap`/Jaccard, `countCheckedCriteria`, `backendOrDefault`/`modelOrDefault`, `buildOneAgent`, `buildAgents`) plus E2E `Run()` flows. Added a test seam: `Orchestrator.runView` (nil → real `tui.RunAgentView`; tests inject a headless drainer) so turns run without launching bubbletea.
+- [x] ~~**codex package tests**~~ — **DONE**. `stream_test.go` covers `ParseStreamLine` (agent_message, command_execution started/completed, ignored/malformed lines), `unwrapShellCommand` (all shell wrappers + escaped quotes + no-wrapper), and `singleLine`. `codex_test.go` covers constructors, streaming callbacks, and `ValidateModel` (skips if codex CLI unavailable).
+- [x] ~~**End-to-end smoke test**~~ — **DONE**. A scripted fake `agent.StreamingAgent` drives the full relay: spec pre-turns → alternating turns → consensus stop. Cases: reaches consensus, exhausts max-turns, surfaces `ErrAgentBlocked`, and fails when pre-turns leave the spec DRAFT.
 
 ## Security — hard enforcement of blocklist
 
@@ -74,7 +155,7 @@ The current `blocked_commands` config is **soft enforcement** (prompt-injected).
 ## Polish / reliability
 
 - [ ] **Graceful handling of corrupt task log** — if the markdown is malformed, recover (skip bad entries, show warning) instead of crashing.
-- [ ] **Better error messages on missing CLI** — if `claude`/`codex` isn't installed, show a clear "Install with `npm install -g @anthropic-ai/claude-code`" message instead of a generic exec error.
+- [x] ~~**Better error messages on missing CLI**~~ — **DONE**. `agent.CheckCLI` + per-backend `EnsureAvailable()`; proactive check in `cli.Run` and `exec.ErrNotFound` mapping in `RunTurn` surface a clear "Install with `npm install -g …`" message.
 - [ ] **Stream buffering tuning** — large prompts or very verbose turns may hit the 1MB scanner buffer. Make it configurable or larger.
 - [ ] **Context window awareness** — detect when an agent is approaching its context limit and log a warning.
 - [ ] **Handle network/API failures** — retry on transient errors from the backend CLI instead of failing the turn.
