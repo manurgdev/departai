@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math/rand"
 	"os"
 	"path/filepath"
 	"strings"
@@ -609,6 +610,10 @@ type Config struct {
 	// header, original task, and all directives). The full log on disk is
 	// never trimmed.
 	LogWindow int
+
+	// MaxRetries is how many times a turn is retried after a transient backend
+	// failure (rate limit, network blip, 5xx). 0 disables retries.
+	MaxRetries int
 }
 
 // agentViewRunner matches the signature of tui.RunAgentView. The orchestrator
@@ -634,6 +639,10 @@ type Orchestrator struct {
 	// runView renders a turn's live output. nil means "use the real bubbletea
 	// TUI" (tui.RunAgentView); tests set it to a headless runner.
 	runView agentViewRunner
+
+	// sleep waits between retry attempts. nil means time.Sleep; tests set it to
+	// a no-op so the retry loop runs instantly.
+	sleep func(time.Duration)
 
 	// Detection state — populated after a turn, consumed (and cleared) when
 	// the next prompt is built.
@@ -841,7 +850,10 @@ func (o *Orchestrator) Run() error {
 	}
 	if isDraft || o.cfg.ForceSpecPreturn {
 		for i, ag := range o.agents {
-			result, stopped, runErr := o.runSpecPreturn(ag, i+1, len(o.agents), taskStart)
+			idx := i
+			result, stopped, runErr := o.runWithRetry(ag.Name(), func() (agent.TurnResult, bool, error) {
+				return o.runSpecPreturn(ag, idx+1, len(o.agents), taskStart)
+			})
 
 			if logErr := o.taskLog.WriteSpecPreturnLog(i+1, ag.Name(), result.Activity, result.Output, result.Stderr); logErr != nil {
 				ui.Warning(fmt.Sprintf("could not write spec pre-turn log: %v", logErr))
@@ -880,7 +892,9 @@ func (o *Orchestrator) Run() error {
 			return fmt.Errorf("building prompt for turn %d: %w", turn, err)
 		}
 
-		result, stopped, runErr := o.runTurnWithTUI(ag, prompt, turn, taskStart)
+		result, stopped, runErr := o.runWithRetry(ag.Name(), func() (agent.TurnResult, bool, error) {
+			return o.runTurnWithTUI(ag, prompt, turn, taskStart)
+		})
 
 		// Always persist raw logs and the touched-files sidecar — even on
 		// error/stop/timeout, for diagnostics and detection.
@@ -1259,6 +1273,117 @@ func (o *Orchestrator) maybeRelocateTaskDir() error {
 // wrapper around runAgentWithTUI that uses the default "Turn N" label.
 func (o *Orchestrator) runTurnWithTUI(ag agent.Agent, prompt string, turn int, taskStart time.Time) (agent.TurnResult, bool, error) {
 	return o.runAgentWithTUI(ag, prompt, turn, taskStart, "")
+}
+
+// transientPatterns are substrings (lowercased) that signal a retryable,
+// transient backend failure: rate limits, overload, 5xx, and network blips.
+var transientPatterns = []string{
+	"rate limit", "rate_limit", "too many requests", "429",
+	"overloaded", "529",
+	"500 internal", "502 ", "bad gateway", "503 ", "service unavailable",
+	"504 ", "gateway timeout",
+	"timeout", "timed out", "deadline exceeded", "i/o timeout",
+	"connection reset", "connection refused", "connection closed",
+	"network is unreachable", "no route to host", "temporary failure",
+	"tls handshake", "eof", "broken pipe",
+}
+
+// permanentPatterns are substrings (lowercased) that mark a failure as NOT
+// worth retrying even if a transient pattern also appears: auth, bad model,
+// missing CLI, rejected input. These take precedence.
+var permanentPatterns = []string{
+	"invalid model", "model not found", "unknown model", "no such model",
+	"unauthorized", "authentication", "401", "403", "permission denied",
+	"not installed", "not on your path", "command not found", "executable file not found",
+	"invalid api key", "api key",
+}
+
+// isTransientError reports whether a turn failure looks transient (and thus
+// worth retrying). It is heuristic: the only signal available from a CLI
+// backend is the exit error plus stderr. Permanent markers win over transient
+// ones, and the default is "not transient" (don't retry on uncertainty).
+func isTransientError(err error, stderr string) bool {
+	if err == nil {
+		return false
+	}
+	// A cancelled context (ESC / deadline) is never a transient API failure.
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	hay := strings.ToLower(err.Error() + "\n" + stderr)
+	for _, p := range permanentPatterns {
+		if strings.Contains(hay, p) {
+			return false
+		}
+	}
+	for _, p := range transientPatterns {
+		if strings.Contains(hay, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// retryDelay returns the base (pre-jitter) backoff for a given 1-based attempt:
+// 3s, 12s, 48s, … (exponential, factor 4).
+func retryDelay(attempt int) time.Duration {
+	d := 3 * time.Second
+	for i := 1; i < attempt; i++ {
+		d *= 4
+	}
+	return d
+}
+
+// withJitter spreads a delay by ±25% to avoid synchronized retries. Uses a
+// non-crypto RNG; jitter is cosmetic, not security-sensitive.
+func withJitter(d time.Duration) time.Duration {
+	if d <= 0 {
+		return d
+	}
+	span := int64(d / 2)                  // ±25% → total span of 50%
+	delta := rand.Int63n(span+1) - span/2 // in [-span/2, +span/2]
+	return d + time.Duration(delta)
+}
+
+// sleepFor waits, using the injectable seam so tests don't actually block.
+func (o *Orchestrator) sleepFor(d time.Duration) {
+	if o.sleep != nil {
+		o.sleep(d)
+		return
+	}
+	time.Sleep(d)
+}
+
+// runWithRetry runs a turn (via the provided closure) and retries it on a
+// transient failure, up to o.cfg.MaxRetries times, with exponential backoff +
+// jitter. User-stop (ESC), timeouts, and non-transient errors return
+// immediately without retrying.
+func (o *Orchestrator) runWithRetry(agentName string, run func() (agent.TurnResult, bool, error)) (agent.TurnResult, bool, error) {
+	attempts := o.cfg.MaxRetries + 1
+	var (
+		result  agent.TurnResult
+		stopped bool
+		err     error
+	)
+	for attempt := 1; attempt <= attempts; attempt++ {
+		result, stopped, err = run()
+		if stopped || err == nil {
+			return result, stopped, err
+		}
+		// Never retry a forced timeout — the caller handles it specially.
+		var timeout *ErrTurnTimeout
+		if errors.As(err, &timeout) {
+			return result, stopped, err
+		}
+		// Last attempt, or a non-transient failure → give up.
+		if attempt > o.cfg.MaxRetries || !isTransientError(err, result.Stderr) {
+			return result, stopped, err
+		}
+		delay := withJitter(retryDelay(attempt))
+		ui.RetryNotice(agentName, attempt, o.cfg.MaxRetries, delay)
+		o.sleepFor(delay)
+	}
+	return result, stopped, err
 }
 
 // runAgentWithTUI runs an agent with a bubbletea TUI for live output.

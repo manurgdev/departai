@@ -90,3 +90,40 @@ func TestMergeDoesNotClobberWithEmpty(t *testing.T) {
 		t.Errorf("empty src should not clobber dst; got %+v", dst)
 	}
 }
+
+func TestRetries(t *testing.T) {
+	zero, five := 0, 5
+	cases := []struct {
+		name string
+		cfg  Config
+		want int
+	}{
+		{"unset uses default", Config{}, DefaultMaxRetries},
+		{"explicit zero disables", Config{MaxRetries: &zero}, 0},
+		{"explicit value", Config{MaxRetries: &five}, 5},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.cfg.Retries(); got != tc.want {
+				t.Errorf("Retries() = %d, want %d", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestMergeMaxRetries(t *testing.T) {
+	// A configured value (incl. 0) overrides; absence (nil) does not clobber.
+	zero := 0
+	dst := Config{}
+	merge(&dst, Config{MaxRetries: &zero})
+	if dst.MaxRetries == nil || *dst.MaxRetries != 0 {
+		t.Errorf("explicit 0 should merge in; got %v", dst.MaxRetries)
+	}
+
+	three := 3
+	dst2 := Config{MaxRetries: &three}
+	merge(&dst2, Config{}) // nil src
+	if dst2.MaxRetries == nil || *dst2.MaxRetries != 3 {
+		t.Errorf("nil src should not clobber; got %v", dst2.MaxRetries)
+	}
+}

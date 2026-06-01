@@ -55,6 +55,7 @@ func Run(args []string) error {
 	maxTurnsFlag := fs.Int("max-turns", 0, "Maximum number of agent turns (default: unlimited)")
 	maxTurnDurationFlag := fs.String("max-turn-duration", "", "Per-turn wall-clock budget (e.g. 15m, 1h30m); empty = no limit")
 	logWindowFlag := fs.Int("log-window", 0, "Inject only the last N turns into each prompt (default: 0 = full log)")
+	maxRetriesFlag := fs.Int("max-retries", -1, "Retries on a transient backend failure per turn (default: 2; 0 disables)")
 	modelFlag := fs.String("model", "", "Model to use (e.g. claude-opus-4-5); overrides config")
 	backendFlag := fs.String("backend", "", "Agent backend to use (default: claude)")
 	versionFlag := fs.Bool("version", false, "Print version, then exit (add --verbose for build details)")
@@ -108,6 +109,10 @@ func Run(args []string) error {
 			return fmt.Errorf("--log-window must be 0 (no windowing) or a positive integer, got %d", *logWindowFlag)
 		}
 		cfg.LogWindow = *logWindowFlag
+	}
+	if *maxRetriesFlag >= 0 { // -1 = not provided
+		n := *maxRetriesFlag
+		cfg.MaxRetries = &n
 	}
 	if *instructionsFlag != "" {
 		cfg.InstructionsFile = *instructionsFlag

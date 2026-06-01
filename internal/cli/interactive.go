@@ -271,6 +271,7 @@ var configSetKeys = []suggestion{
 	{"max-turns", "Maximum agent turns (integer)"},
 	{"max-turn-duration", "Per-turn wall-clock budget (e.g. 15m, 1h30m)"},
 	{"log-window", "Inject only the last N turns into each prompt (0 = full log)"},
+	{"max-retries", "Retries per turn on a transient backend failure (0 = disabled)"},
 	{"instructions", "Path to instructions markdown file"},
 	{"mode", "Active mode: dev or ask"},
 	{"blocked-commands", "Comma-separated tools/commands agents must NOT use"},
@@ -345,7 +346,7 @@ func handleConfigSet(kv string, workDir string, cfg *config.Config) {
 	parts := strings.SplitN(strings.TrimSpace(kv), " ", 2)
 	if len(parts) < 2 || parts[1] == "" {
 		ui.ConfigSetError("usage: /config set <key> <value>")
-		ui.ConfigSetError("keys: model, model.alpha, model.beta, backend, backend.alpha, backend.beta, mode, max-turns, max-turn-duration, log-window, instructions, blocked-commands")
+		ui.ConfigSetError("keys: model, model.alpha, model.beta, backend, backend.alpha, backend.beta, mode, max-turns, max-turn-duration, log-window, max-retries, instructions, blocked-commands")
 		return
 	}
 
@@ -447,6 +448,20 @@ func handleConfigSet(kv string, workDir string, cfg *config.Config) {
 		}
 		promptAndSave(workDir, *cfg)
 
+	case "max-retries":
+		n, err := strconv.Atoi(value)
+		if err != nil || n < 0 {
+			ui.ConfigSetError("max-retries must be 0 (disabled) or a positive integer")
+			return
+		}
+		cfg.MaxRetries = &n
+		if n == 0 {
+			ui.ConfigSet(key, "0 (retries disabled)")
+		} else {
+			ui.ConfigSet(key, value)
+		}
+		promptAndSave(workDir, *cfg)
+
 	case "instructions":
 		cfg.InstructionsFile = value
 		ui.ConfigSet(key, value)
@@ -482,7 +497,7 @@ func handleConfigSet(kv string, workDir string, cfg *config.Config) {
 		promptAndSave(workDir, *cfg)
 
 	default:
-		ui.ConfigSetError(fmt.Sprintf("unknown key %q (valid: model, model.alpha, model.beta, backend, backend.alpha, backend.beta, mode, max-turns, max-turn-duration, log-window, instructions, blocked-commands)", key))
+		ui.ConfigSetError(fmt.Sprintf("unknown key %q (valid: model, model.alpha, model.beta, backend, backend.alpha, backend.beta, mode, max-turns, max-turn-duration, log-window, max-retries, instructions, blocked-commands)", key))
 	}
 }
 
@@ -640,6 +655,7 @@ func runTask(workDir string, cfg config.Config, prompt string, forceSpecPreturn 
 		ForceSpecPreturn: forceSpecPreturn,
 		MaxTurnDuration:  cfg.MaxTurnDuration(),
 		LogWindow:        cfg.LogWindow,
+		MaxRetries:       cfg.Retries(),
 	})
 	if err != nil {
 		return "", fmt.Errorf("initialising orchestrator: %w", err)
@@ -667,6 +683,7 @@ func resumeTask(workDir string, cfg config.Config, taskDir string, forceSpecPret
 		ForceSpecPreturn: forceSpecPreturn,
 		MaxTurnDuration:  cfg.MaxTurnDuration(),
 		LogWindow:        cfg.LogWindow,
+		MaxRetries:       cfg.Retries(),
 	}, taskDir)
 	if err != nil {
 		return taskDir, fmt.Errorf("resuming task: %w", err)

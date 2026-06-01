@@ -149,6 +149,16 @@ func TurnTimeout(agent string, duration time.Duration) {
 	fmt.Println()
 }
 
+// RetryNotice prints a notice that a turn failed with a transient error and is
+// being retried after a backoff delay.
+func RetryNotice(agent string, attempt, maxRetries int, delay time.Duration) {
+	fmt.Println()
+	boldYellow.Printf("  ↻  %s hit a transient error — retrying in %s (attempt %d/%d)\n",
+		agent, delay.Round(time.Second), attempt, maxRetries)
+	faint.Println("     Likely a rate limit or network blip; the same turn will run again.")
+	fmt.Println()
+}
+
 // OscillationDetected prints the loop-detection banner when the orchestrator
 // concludes that the agents are stuck churning the same files without progress.
 // The user can inject a directive, /continue (to give the relay another K-turn
@@ -314,6 +324,7 @@ func WelcomeBanner(workDir string, cfg config.Config) {
 	faint.Printf("  Max turns    : %s\n", maxTurnsDisplay(cfg.MaxTurns))
 	faint.Printf("  Max turn time: %s\n", maxTurnDurationDisplay(cfg.MaxTurnDurationStr))
 	faint.Printf("  Log window   : %s\n", logWindowDisplay(cfg.LogWindow))
+	faint.Printf("  Retries      : %s\n", retriesDisplay(cfg.Retries()))
 	if cfg.InstructionsFile != "" {
 		faint.Printf("  Instructions : %s\n", cfg.InstructionsFile)
 	}
@@ -448,6 +459,13 @@ func maxTurnDurationDisplay(s string) string {
 	return s
 }
 
+func retriesDisplay(n int) string {
+	if n <= 0 {
+		return "disabled"
+	}
+	return fmt.Sprintf("%d", n)
+}
+
 func logWindowDisplay(n int) string {
 	if n <= 0 {
 		return "unlimited"
@@ -507,6 +525,7 @@ func ShowConfig(workDir string, cfg config.Config) {
 	fmt.Printf("    Max turns    : %s\n", maxTurnsDisplay(cfg.MaxTurns))
 	fmt.Printf("    Max turn time: %s\n", maxTurnDurationDisplay(cfg.MaxTurnDurationStr))
 	fmt.Printf("    Log window   : %s\n", logWindowDisplay(cfg.LogWindow))
+	fmt.Printf("    Retries      : %s\n", retriesDisplay(cfg.Retries()))
 	if cfg.InstructionsFile != "" {
 		fmt.Printf("    Instructions : %s\n", cfg.InstructionsFile)
 	}

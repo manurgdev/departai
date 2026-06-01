@@ -157,6 +157,152 @@ func TestBuildAgentsUnknownBackend(t *testing.T) {
 	}
 }
 
+func TestIsTransientError(t *testing.T) {
+	cases := []struct {
+		name   string
+		err    error
+		stderr string
+		want   bool
+	}{
+		{"nil error", nil, "", false},
+		{"rate limit", errors.New("agent failed"), "Error: rate limit exceeded", true},
+		{"429", errors.New("exited: HTTP 429"), "", true},
+		{"overloaded 529", errors.New("api error"), "529 overloaded_error", true},
+		{"503", errors.New("503 Service Unavailable"), "", true},
+		{"connection reset", errors.New("read tcp: connection reset by peer"), "", true},
+		{"io timeout", errors.New("dial tcp: i/o timeout"), "", true},
+		{"plain unknown error", errors.New("something odd happened"), "", false},
+		{"invalid model (permanent)", errors.New("invalid model foo-bar"), "", false},
+		{"401 unauthorized (permanent)", errors.New("401 unauthorized"), "", false},
+		{"cli not installed (permanent)", errors.New("executable file not found in $PATH"), "", false},
+		// Permanent marker wins even when a transient one is also present.
+		{"permanent beats transient", errors.New("429 rate limit"), "invalid api key", false},
+		{"context canceled", context.Canceled, "rate limit", false},
+		{"deadline exceeded", context.DeadlineExceeded, "timeout", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isTransientError(tc.err, tc.stderr); got != tc.want {
+				t.Errorf("isTransientError = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestRetryDelayIsIncreasing(t *testing.T) {
+	d1, d2, d3 := retryDelay(1), retryDelay(2), retryDelay(3)
+	if !(d1 < d2 && d2 < d3) {
+		t.Errorf("expected increasing backoff, got %v, %v, %v", d1, d2, d3)
+	}
+	if d1 != 3*time.Second {
+		t.Errorf("retryDelay(1) = %v, want 3s", d1)
+	}
+}
+
+func TestWithJitterStaysInBand(t *testing.T) {
+	base := 4 * time.Second
+	for i := 0; i < 200; i++ {
+		d := withJitter(base)
+		// ±25% band.
+		if d < 3*time.Second || d > 5*time.Second {
+			t.Fatalf("jittered delay %v out of [3s,5s] band", d)
+		}
+	}
+}
+
+func TestRunWithRetry(t *testing.T) {
+	transient := func() (agent.TurnResult, bool, error) {
+		return agent.TurnResult{Stderr: "rate limit exceeded"}, false, errors.New("turn failed: rate limit")
+	}
+
+	t.Run("succeeds first try", func(t *testing.T) {
+		o := &Orchestrator{cfg: Config{MaxRetries: 2}, sleep: func(time.Duration) {}}
+		calls := 0
+		_, _, err := o.runWithRetry("Agent Alpha", func() (agent.TurnResult, bool, error) {
+			calls++
+			return agent.TurnResult{Output: "ok"}, false, nil
+		})
+		if err != nil || calls != 1 {
+			t.Errorf("calls=%d err=%v, want 1 call no error", calls, err)
+		}
+	})
+
+	t.Run("retries transient then succeeds", func(t *testing.T) {
+		o := &Orchestrator{cfg: Config{MaxRetries: 2}, sleep: func(time.Duration) {}}
+		calls := 0
+		_, _, err := o.runWithRetry("Agent Alpha", func() (agent.TurnResult, bool, error) {
+			calls++
+			if calls < 3 {
+				return transient()
+			}
+			return agent.TurnResult{Output: "ok"}, false, nil
+		})
+		if err != nil || calls != 3 {
+			t.Errorf("calls=%d err=%v, want 3 calls no error", calls, err)
+		}
+	})
+
+	t.Run("gives up after max retries", func(t *testing.T) {
+		o := &Orchestrator{cfg: Config{MaxRetries: 2}, sleep: func(time.Duration) {}}
+		calls := 0
+		_, _, err := o.runWithRetry("Agent Alpha", func() (agent.TurnResult, bool, error) {
+			calls++
+			return transient()
+		})
+		if err == nil || calls != 3 { // 1 initial + 2 retries
+			t.Errorf("calls=%d err=%v, want 3 calls with error", calls, err)
+		}
+	})
+
+	t.Run("does not retry non-transient", func(t *testing.T) {
+		o := &Orchestrator{cfg: Config{MaxRetries: 2}, sleep: func(time.Duration) {}}
+		calls := 0
+		_, _, err := o.runWithRetry("Agent Alpha", func() (agent.TurnResult, bool, error) {
+			calls++
+			return agent.TurnResult{}, false, errors.New("invalid model foo")
+		})
+		if err == nil || calls != 1 {
+			t.Errorf("calls=%d err=%v, want 1 call with error", calls, err)
+		}
+	})
+
+	t.Run("does not retry on stop", func(t *testing.T) {
+		o := &Orchestrator{cfg: Config{MaxRetries: 2}, sleep: func(time.Duration) {}}
+		calls := 0
+		_, stopped, _ := o.runWithRetry("Agent Alpha", func() (agent.TurnResult, bool, error) {
+			calls++
+			return agent.TurnResult{}, true, nil
+		})
+		if !stopped || calls != 1 {
+			t.Errorf("calls=%d stopped=%v, want 1 call stopped", calls, stopped)
+		}
+	})
+
+	t.Run("max retries 0 disables", func(t *testing.T) {
+		o := &Orchestrator{cfg: Config{MaxRetries: 0}, sleep: func(time.Duration) {}}
+		calls := 0
+		_, _, err := o.runWithRetry("Agent Alpha", func() (agent.TurnResult, bool, error) {
+			calls++
+			return transient()
+		})
+		if err == nil || calls != 1 {
+			t.Errorf("calls=%d err=%v, want 1 call (no retries)", calls, err)
+		}
+	})
+
+	t.Run("does not retry timeout", func(t *testing.T) {
+		o := &Orchestrator{cfg: Config{MaxRetries: 2}, sleep: func(time.Duration) {}}
+		calls := 0
+		_, _, err := o.runWithRetry("Agent Alpha", func() (agent.TurnResult, bool, error) {
+			calls++
+			return agent.TurnResult{}, false, &ErrTurnTimeout{Agent: "Agent Alpha", Turn: 1}
+		})
+		if err == nil || calls != 1 {
+			t.Errorf("calls=%d err=%v, want 1 call (timeout not retried)", calls, err)
+		}
+	})
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // E2E Run() loop tests with a scripted fake backend
 // ─────────────────────────────────────────────────────────────────────────────

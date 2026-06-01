@@ -15,11 +15,11 @@ import (
 // Config holds all user-configurable departai settings.
 // Fields map 1:1 to YAML keys and CLI flags.
 type Config struct {
-	Mode             string `yaml:"mode,omitempty"`               // "dev" (default) or "ask"
-	AgentBackend     string `yaml:"agent_backend"`                // default backend for all agents
-	BackendAlpha     string `yaml:"backend_alpha,omitempty"`      // override for Agent Alpha
-	BackendBeta      string `yaml:"backend_beta,omitempty"`       // override for Agent Beta
-	MaxTurns         int    `yaml:"max_turns"`
+	Mode         string `yaml:"mode,omitempty"`          // "dev" (default) or "ask"
+	AgentBackend string `yaml:"agent_backend"`           // default backend for all agents
+	BackendAlpha string `yaml:"backend_alpha,omitempty"` // override for Agent Alpha
+	BackendBeta  string `yaml:"backend_beta,omitempty"`  // override for Agent Beta
+	MaxTurns     int    `yaml:"max_turns"`
 	// MaxTurnDuration is parsed from MaxTurnDurationStr — yaml.v3 does not
 	// support time.Duration natively, so we keep the source as a string and
 	// expose a typed helper.
@@ -29,9 +29,14 @@ type Config struct {
 	// (plus header, original task, and all user directives) with an omission
 	// marker covering the dropped range.
 	LogWindow int `yaml:"log_window,omitempty"`
-	Model            string `yaml:"model"`                        // default model for all agents
-	ModelAlpha       string `yaml:"model_alpha,omitempty"`        // override for Agent Alpha
-	ModelBeta        string `yaml:"model_beta,omitempty"`         // override for Agent Beta
+	// MaxRetries is the number of times a turn is retried on a transient
+	// backend failure (rate limit, network blip, 5xx). A pointer so that an
+	// explicit 0 (disable retries) is distinguishable from "not configured"
+	// (use the default). Read it through Retries().
+	MaxRetries       *int   `yaml:"max_retries,omitempty"`
+	Model            string `yaml:"model"`                 // default model for all agents
+	ModelAlpha       string `yaml:"model_alpha,omitempty"` // override for Agent Alpha
+	ModelBeta        string `yaml:"model_beta,omitempty"`  // override for Agent Beta
 	InstructionsFile string `yaml:"instructions_file"`
 
 	// BlockedCommands lists tool names or shell command patterns that agents
@@ -57,6 +62,22 @@ func (c Config) BackendFor(agentName string) string {
 		return "claude"
 	}
 	return c.AgentBackend
+}
+
+// DefaultMaxRetries is the per-turn retry count used when the user hasn't
+// configured one.
+const DefaultMaxRetries = 2
+
+// Retries returns the effective per-turn retry count: the configured value, or
+// DefaultMaxRetries when unset. A configured 0 disables retries.
+func (c Config) Retries() int {
+	if c.MaxRetries == nil {
+		return DefaultMaxRetries
+	}
+	if *c.MaxRetries < 0 {
+		return 0
+	}
+	return *c.MaxRetries
 }
 
 // MaxTurnDuration parses MaxTurnDurationStr into a time.Duration.
@@ -234,6 +255,9 @@ func merge(dst *Config, src Config) {
 	}
 	if src.LogWindow != 0 {
 		dst.LogWindow = src.LogWindow
+	}
+	if src.MaxRetries != nil {
+		dst.MaxRetries = src.MaxRetries
 	}
 	if src.Model != "" {
 		dst.Model = src.Model
