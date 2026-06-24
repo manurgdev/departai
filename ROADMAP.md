@@ -33,8 +33,8 @@ Standard OSS distribution — public, no signing/licensing infra. `go install gi
 - [ ] **Tag `v0.1.0`** — first public release so `go install …@latest` resolves to a stable version.
 - [x] ~~**GitHub Actions CI**~~ — **DONE**. `.github/workflows/ci.yml`: on push/PR to main, runs gofmt check, `go vet`, `go test -race`, and `go build` on ubuntu, using the Go version from `go.mod`. Backend-CLI tests auto-skip when the CLI is absent (as on the runner).
 - [x] ~~**GoReleaser**~~ — **DONE**. `.goreleaser.yaml` (v2) builds 6 cross-platform binaries (macOS/Linux/Windows × amd64/arm64), tar.gz/zip archives + checksums + GitHub-sourced changelog, injecting version/commit/date into `internal/version` via ldflags (so `--version` shows real build time). `.github/workflows/release.yml` runs it on `v*` tags. Validated locally with `goreleaser check` + a `--snapshot` build (binary confirmed showing injected version).
-- [ ] **Homebrew formula/tap** — `brew install departai`.
-- [ ] **Shell completions + man page** — bash/zsh/fish completions; `man departai`.
+- [x] ~~**Homebrew formula/tap**~~ — **DONE**. `homebrew_casks` in `.goreleaser.yaml` pushes a cask to the `manurgdev/homebrew-departai` tap on each release (installs binary + completions + man page; post-install strips Gatekeeper quarantine for the unsigned binary). `brew install manurgdev/departai/departai`. *Maintainer setup:* create the tap repo + `HOMEBREW_TAP_GITHUB_TOKEN` secret.
+- [x] ~~**Shell completions + man page**~~ — **DONE**. `departai completion <bash|zsh|fish>` ([internal/cli/completion.go](internal/cli/completion.go)) prints the script; GoReleaser generates them at release time and the cask installs them. Static `man/departai.1` (lint-clean) installed by the cask. README documents both.
 - [ ] **Changelog discipline** — semver, tagged releases, CHANGELOG.md.
 
 > macOS code signing / notarization is **optional** for an OSS tool installed via `go install`/Homebrew (those paths don't trip Gatekeeper the way a downloaded `.app` does). Revisit only if shipping standalone downloadable binaries that users double-click.
@@ -150,9 +150,9 @@ Possible future modes (each with its own protocol):
 - [ ] **Tag `v0.1.0` release** — so `go install github.com/manurgdev/departai@latest` works with a stable version.
 - [x] ~~**GitHub Actions CI**~~ — **DONE**. See Phase 2 — gofmt/vet/test-race/build on push/PR.
 - [x] ~~**GoReleaser**~~ — **DONE**. See Phase 2 — `.goreleaser.yaml` + release workflow on `v*` tags.
-- [ ] **Homebrew formula** — `brew install departai`.
-- [ ] **Shell completions** — bash/zsh/fish completions for `--dir`, `--model`, `--backend`, etc.
-- [ ] **Man page** — `man departai` with full flag documentation.
+- [x] ~~**Homebrew formula**~~ — **DONE**. See Phase 2 — Homebrew cask via GoReleaser to the `homebrew-departai` tap.
+- [x] ~~**Shell completions**~~ — **DONE**. See Phase 2 — `departai completion <shell>` for bash/zsh/fish.
+- [x] ~~**Man page**~~ — **DONE**. See Phase 2 — static `man/departai.1`.
 - [ ] **`--verbose` / `--debug` flag** — the `--verbose` flag exists (currently it only expands `--version` into full build info). Still TODO: have `--verbose`/`--debug` dump the full prompt sent to each agent for debugging (currently only in raw logs).
 - [x] ~~**`--version` flag**~~ — **DONE**. See Phase 1 / `internal/version`.
 

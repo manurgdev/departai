@@ -4,6 +4,9 @@ departai
 # GoReleaser build artifacts
 dist/
 
+# Generated at release time by the `completion` hooks
+completions/
+
 # OS
 .DS_Store
 

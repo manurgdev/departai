@@ -8,6 +8,12 @@ project_name: departai
 before:
   hooks:
     - go mod tidy
+    # Generate shell completions from the `completion` subcommand (no backend
+    # CLI needed, so this runs in CI). Wrapped in sh -c for the redirect.
+    - mkdir -p completions
+    - sh -c "go run . completion bash > completions/departai.bash"
+    - sh -c "go run . completion zsh > completions/departai.zsh"
+    - sh -c "go run . completion fish > completions/departai.fish"
 
 builds:
   - id: departai
@@ -43,6 +49,8 @@ archives:
       - README.md
       - LICENSE
       - ROADMAP.md
+      - completions/*
+      - man/departai.1
 
 checksum:
   name_template: checksums.txt
@@ -58,6 +66,32 @@ changelog:
       - "^ci:"
       - "Merge pull request"
       - "Merge branch"
+
+homebrew_casks:
+  - name: departai
+    binaries:
+      - departai
+    repository:
+      owner: manurgdev
+      name: homebrew-departai
+      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
+    homepage: "https://github.com/manurgdev/departai"
+    description: "Orchestrate two AI coding agents in a deterministic, sequential relay"
+    license: "MIT"
+    completions:
+      bash: completions/departai.bash
+      zsh: completions/departai.zsh
+      fish: completions/departai.fish
+    manpages:
+      - man/departai.1
+    # The released binaries are unsigned; strip the Gatekeeper quarantine
+    # attribute on install so macOS doesn't block the binary.
+    hooks:
+      post:
+        install: |
+          if system_command("/usr/bin/xattr", args: ["-h"]).exit_status == 0
+            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/departai"]
+          end
 
 release:
   draft: false
