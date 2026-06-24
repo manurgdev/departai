@@ -1,0 +1,122 @@
+.TH DEPARTAI 1 "June 24, 2026" "DepartAI" "User Commands"
+.SH NAME
+departai \- orchestrate two AI coding agents in a sequential relay
+.SH SYNOPSIS
+.B departai
+.RI [ flags ]
+.RI [ prompt ]
+.br
+.B departai completion
+.IR bash | zsh | fish
+.SH DESCRIPTION
+.B departai
+runs two AI coding agents in a deterministic, sequential relay on a shared
+task. Each agent can use a different backend and model (e.g. Alpha on Claude,
+Beta on OpenAI Codex), so two model families catch each other's blind spots.
+Agents hand off context through a shared task log, review each other's work
+each turn, and stop only when both independently agree the task is complete and
+every acceptance criterion in a shared spec is checked.
+.PP
+With no
+.I prompt
+argument, departai starts an interactive REPL. With a
+.I prompt
+argument, it runs a single task and exits.
+.PP
+At least one supported backend CLI
+.RB ( claude
+or
+.BR codex )
+must be installed and authenticated \(em departai uses your own LLM
+subscription(s).
+.SH OPTIONS
+.TP
+.BI \-\-dir " path"
+Working directory where agents operate (default: current directory).
+.TP
+.BI \-\-backend " name"
+Agent backend to use:
+.B claude
+(default) or
+.BR codex .
+.TP
+.BI \-\-model " name"
+Model to use; overrides config. Validated against the active backend.
+.TP
+.BI \-\-instructions " path"
+Path to a custom base instructions markdown file.
+.TP
+.BI \-\-max\-turns " n"
+Maximum number of agent turns per run (0 = unlimited).
+.TP
+.BI \-\-max\-turn\-duration " dur"
+Per-turn wall-clock budget in Go duration format (e.g.
+.BR 15m ", " 1h30m );
+empty = no limit.
+.TP
+.BI \-\-log\-window " n"
+Inject only the last N turns into each prompt (0 = full log). Reduces token
+cost on long tasks.
+.TP
+.BI \-\-max\-retries " n"
+Retries per turn on a transient backend failure (rate limit, 5xx, network
+blip); 0 disables. Default 2.
+.TP
+.B \-\-version
+Print version and exit. Add
+.B \-\-verbose
+for commit, build date, and Go toolchain.
+.TP
+.B \-\-verbose
+More detailed output (e.g. full build info with
+.BR \-\-version ).
+.SH COMMANDS
+.TP
+.BI "completion " shell
+Print a shell completion script for
+.BR bash ", " zsh ", or " fish
+to standard output.
+.SH CONFIGURATION
+Configuration is loaded in layers (later wins): built-in defaults, then
+.IR ~/.departai/config.yml " (user-global), then"
+.IR <project>/.departai/config.yml " (project-level), then CLI flags."
+Keys include
+.BR mode ", " agent_backend ", " backend_alpha / backend_beta ", "
+.BR model ", " model_alpha / model_beta ", " max_turns ", "
+.BR max_turn_duration ", " log_window ", " max_retries ", and "
+.BR blocked_commands .
+.SH ENVIRONMENT
+.TP
+.B DEPARTAI_MAX_STREAM_LINE_MB
+Maximum size, in megabytes, of a single backend stream line (default 16).
+Raise it for pathological outputs.
+.SH FILES
+.TP
+.I ~/.departai/config.yml
+User-global configuration.
+.TP
+.I ~/.departai/history.txt
+Persistent REPL command history.
+.TP
+.I <project>/.departai/config.yml
+Project-level configuration.
+.TP
+.I <project>/.departai/tasks/<id>/
+Per-task spec, task log, and raw turn logs.
+.SH EXAMPLES
+.TP
+Start the interactive REPL:
+.B departai
+.TP
+Run a single task:
+.B departai "Add unit tests to the parser"
+.TP
+Use a specific backend and model:
+.B departai \-\-backend codex \-\-model gpt-5.3-codex "Fix the failing CI"
+.TP
+Install zsh completions:
+.B departai completion zsh > ~/.zsh/completions/_departai
+.SH SEE ALSO
+Project home and documentation: https://github.com/manurgdev/departai
+.SH AUTHOR
+Manuel Rodriguez Gil and contributors.

@@ -42,6 +42,13 @@ Flags:
 
 // Run parses args, loads config, and starts the orchestrator.
 func Run(args []string) error {
+	// Subcommands are intercepted before flag parsing so they never collide
+	// with a task prompt. Keep the completion flag list in completion.go in
+	// sync with the flags defined below.
+	if len(args) > 0 && args[0] == "completion" {
+		return runCompletion(args[1:])
+	}
+
 	fs := flag.NewFlagSet("departai", flag.ContinueOnError)
 	fs.Usage = func() {
 		fmt.Fprint(os.Stderr, usage)

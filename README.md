@@ -49,6 +49,15 @@ departai
 
 ## Installation
 
+### Homebrew (macOS)
+
+```bash
+brew install manurgdev/departai/departai
+```
+
+This installs the binary plus shell completions and the man page (`man departai`).
+On Linux, use `go install` or the pre-built binaries below.
+
 ### Using go install
 
 ```bash
@@ -93,6 +102,17 @@ Check your version anytime:
 ```bash
 departai --version            # departai vX.Y.Z (os/arch)
 departai --version --verbose  # + commit, build date, Go toolchain
+```
+
+### Shell completions
+
+Homebrew installs completions automatically. With `go install`, generate them
+for your shell:
+
+```bash
+departai completion zsh  > ~/.zsh/completions/_departai      # zsh
+departai completion bash > /etc/bash_completion.d/departai   # bash
+departai completion fish > ~/.config/fish/completions/departai.fish  # fish
 ```
 
 ## Usage
