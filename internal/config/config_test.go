@@ -1,6 +1,31 @@
 package config
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"testing"
+)
+
+func TestExists(t *testing.T) {
+	// Isolate HOME so a real ~/.departai/config.yml doesn't leak in.
+	t.Setenv("HOME", t.TempDir())
+	work := t.TempDir()
+
+	if Exists(work) {
+		t.Error("expected no config for a fresh working dir")
+	}
+
+	p := ProjectPath(work)
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(p, []byte("mode: dev\n"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if !Exists(work) {
+		t.Error("expected Exists=true after creating a project config")
+	}
+}
 
 func TestModelFor(t *testing.T) {
 	cases := []struct {

@@ -659,6 +659,10 @@ type Orchestrator struct {
 	// oscillationConsecutive counts how many consecutive turns have fit the
 	// oscillation pattern. >= oscillationStopThreshold returns ErrOscillationDetected.
 	oscillationConsecutive int
+
+	// contextWarned ensures the context-window warning fires at most once per
+	// Run() invocation, to avoid repeating it every turn once the prompt is big.
+	contextWarned bool
 }
 
 // Detection tunables — hardcoded for MVP. If usage shows they need adjustment,
@@ -891,6 +895,8 @@ func (o *Orchestrator) Run() error {
 		if err != nil {
 			return fmt.Errorf("building prompt for turn %d: %w", turn, err)
 		}
+
+		o.checkContextBudget(prompt, ag.Name())
 
 		result, stopped, runErr := o.runWithRetry(ag.Name(), func() (agent.TurnResult, bool, error) {
 			return o.runTurnWithTUI(ag, prompt, turn, taskStart)
@@ -1267,6 +1273,63 @@ func (o *Orchestrator) maybeRelocateTaskDir() error {
 	ui.Relocated(oldDir, o.taskLog.Dir)
 	o.cfg.WorkDir = reported
 	return nil
+}
+
+// ── context-window awareness ─────────────────────────────────────────────────
+
+const (
+	// contextWarnThreshold is the fraction of a model's context window at which
+	// we warn that the prompt is getting large.
+	contextWarnThreshold = 0.8
+	// defaultContextWindow is a conservative fallback (tokens) for models we
+	// can't identify. Erring small means we warn a little early rather than
+	// miss a real overflow.
+	defaultContextWindow = 200_000
+	// oneMillionContextWindow is for the explicit `[1m]` / `-1m` model variants.
+	oneMillionContextWindow = 1_000_000
+)
+
+// estimateTokens approximates the token count of a string. The ~4-chars-per-token
+// heuristic is rough but fine for a "you're getting close" warning — we don't
+// need a real tokenizer here, and it stays backend-agnostic.
+func estimateTokens(s string) int {
+	return len(s) / 4
+}
+
+// contextWindowFor returns the assumed context window (tokens) for a model.
+// Deliberately a tiny heuristic rather than a maintained model→window table
+// (which would rot with every new model): only the explicit 1M variants are
+// special-cased; everything else gets a conservative default.
+func contextWindowFor(model string) int {
+	m := strings.ToLower(model)
+	if strings.Contains(m, "[1m]") || strings.Contains(m, "-1m") {
+		return oneMillionContextWindow
+	}
+	return defaultContextWindow
+}
+
+// contextBudgetExceeded reports whether the prompt's estimated tokens are at or
+// over the warn threshold for the model's context window. Pure — the Run loop
+// wraps it with a one-shot warning.
+func contextBudgetExceeded(prompt, model string) (estTokens, window int, exceeded bool) {
+	window = contextWindowFor(model)
+	estTokens = estimateTokens(prompt)
+	exceeded = float64(estTokens) >= contextWarnThreshold*float64(window)
+	return
+}
+
+// checkContextBudget warns once per run when a turn's prompt is approaching the
+// agent's context window, suggesting log windowing to bound prompt growth.
+func (o *Orchestrator) checkContextBudget(prompt, agentName string) {
+	if o.contextWarned {
+		return
+	}
+	est, window, exceeded := contextBudgetExceeded(prompt, o.agentModel(agentName))
+	if !exceeded {
+		return
+	}
+	o.contextWarned = true
+	ui.ContextWindowWarning(agentName, est, window, o.cfg.LogWindow)
 }
 
 // runTurnWithTUI runs a regular relay turn with the streaming TUI. Thin

@@ -28,6 +28,11 @@ import (
 // sessions, smart Up/Down (history at line boundaries, cursor movement
 // otherwise). Ctrl+C cancels the current line; Ctrl+D / /exit / /quit exit.
 func runInteractive(workDir string, cfg config.Config) error {
+	// First-run onboarding: detect backends and optionally seed a global config.
+	if isFirstRun(workDir) {
+		cfg = runOnboarding(workDir, cfg)
+	}
+
 	ui.WelcomeBanner(workDir, cfg)
 
 	cfgPtr := &cfg

@@ -189,6 +189,69 @@ func TestIsTransientError(t *testing.T) {
 	}
 }
 
+func TestEstimateTokens(t *testing.T) {
+	if got := estimateTokens(""); got != 0 {
+		t.Errorf("empty = %d, want 0", got)
+	}
+	if got := estimateTokens(strings.Repeat("x", 400)); got != 100 {
+		t.Errorf("400 chars = %d, want 100", got)
+	}
+}
+
+func TestContextWindowFor(t *testing.T) {
+	cases := []struct {
+		model string
+		want  int
+	}{
+		{"claude-opus-4-8[1m]", oneMillionContextWindow},
+		{"some-model-1m", oneMillionContextWindow},
+		{"claude-opus-4-8", defaultContextWindow},
+		{"gpt-5.3-codex", defaultContextWindow},
+		{"", defaultContextWindow},
+	}
+	for _, tc := range cases {
+		t.Run(tc.model, func(t *testing.T) {
+			if got := contextWindowFor(tc.model); got != tc.want {
+				t.Errorf("contextWindowFor(%q) = %d, want %d", tc.model, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestContextBudgetExceeded(t *testing.T) {
+	// 200k window → threshold at 160k tokens → ~640k chars.
+	small := strings.Repeat("x", 1000)
+	if _, _, exceeded := contextBudgetExceeded(small, "claude-opus-4-8"); exceeded {
+		t.Error("small prompt should not exceed the budget")
+	}
+
+	big := strings.Repeat("x", 700_000) // ~175k tokens > 160k threshold
+	est, window, exceeded := contextBudgetExceeded(big, "claude-opus-4-8")
+	if !exceeded {
+		t.Errorf("big prompt should exceed: est=%d window=%d", est, window)
+	}
+
+	// Same big prompt under a 1M window is well within budget.
+	if _, _, exceeded := contextBudgetExceeded(big, "claude-opus-4-8[1m]"); exceeded {
+		t.Error("big prompt should be fine under a 1M window")
+	}
+}
+
+func TestCheckContextBudgetWarnsOnce(t *testing.T) {
+	o := &Orchestrator{cfg: Config{Model: "claude-opus-4-8"}}
+	big := strings.Repeat("x", 700_000)
+
+	o.checkContextBudget(big, "Agent Alpha")
+	if !o.contextWarned {
+		t.Fatal("expected contextWarned=true after crossing threshold")
+	}
+	// Idempotent: stays warned, doesn't reset.
+	o.checkContextBudget(big, "Agent Alpha")
+	if !o.contextWarned {
+		t.Error("contextWarned should remain true")
+	}
+}
+
 func TestRetryDelayIsIncreasing(t *testing.T) {
 	d1, d2, d3 := retryDelay(1), retryDelay(2), retryDelay(3)
 	if !(d1 < d2 && d2 < d3) {

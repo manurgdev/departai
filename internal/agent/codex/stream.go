@@ -12,7 +12,7 @@ import (
 // ── JSON wire types ─────────────────────────────────────────────────────────
 
 type jsonLine struct {
-	Type string   `json:"type"`
+	Type string    `json:"type"`
 	Item *jsonItem `json:"item,omitempty"`
 }
 

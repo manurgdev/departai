@@ -180,6 +180,21 @@ func Load(workDir string) (Config, error) {
 	return cfg, nil
 }
 
+// Exists reports whether any departai config file is present for workDir —
+// global, project, or a legacy location. Used to detect a first run.
+func Exists(workDir string) bool {
+	candidates := []string{GlobalPath(), legacyGlobalPath(), ProjectPath(workDir)}
+	for _, name := range []string{".departai.yml", ".departai.yaml"} {
+		candidates = append(candidates, filepath.Join(workDir, name))
+	}
+	for _, p := range candidates {
+		if p != "" && fileExists(p) {
+			return true
+		}
+	}
+	return false
+}
+
 // ── saving ─────────────────────────────────────────────────────────────────
 
 // Save writes the config to the given path as YAML, creating parent

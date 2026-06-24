@@ -149,6 +149,35 @@ func TurnTimeout(agent string, duration time.Duration) {
 	fmt.Println()
 }
 
+// ContextWindowWarning warns that a turn's prompt is approaching the agent's
+// context window, suggesting log windowing to bound prompt growth. logWindow is
+// the current setting (0 = off).
+func ContextWindowWarning(agent string, estTokens, window, logWindow int) {
+	pct := int(float64(estTokens) / float64(window) * 100)
+	fmt.Println()
+	boldYellow.Printf("  ⚠  %s's prompt is ~%s tokens — %d%% of the ~%s context window\n",
+		agent, humanTokens(estTokens), pct, humanTokens(window))
+	if logWindow > 0 {
+		faint.Printf("     Log window is %d. Lower it to shrink prompts: /config set log-window %d\n", logWindow, logWindow/2+1)
+	} else {
+		faint.Println("     Bound prompt growth by windowing the task log: /config set log-window 6")
+	}
+	faint.Println("     (The spec preserves long-term state, so older turns can be safely elided.)")
+	fmt.Println()
+}
+
+// humanTokens formats a token count like "52k" / "1.2M" / "800".
+func humanTokens(n int) string {
+	switch {
+	case n >= 1_000_000:
+		return fmt.Sprintf("%.1fM", float64(n)/1_000_000)
+	case n >= 1_000:
+		return fmt.Sprintf("%dk", n/1_000)
+	default:
+		return fmt.Sprintf("%d", n)
+	}
+}
+
 // RetryNotice prints a notice that a turn failed with a transient error and is
 // being retried after a backoff delay.
 func RetryNotice(agent string, attempt, maxRetries int, delay time.Duration) {
@@ -311,6 +340,74 @@ func Error(msg string) {
 }
 
 // ── interactive mode ────────────────────────────────────────────────────────
+
+// OnboardingWelcome prints the first-run welcome: what departai is, plus which
+// backends were detected.
+func OnboardingWelcome(hasClaude, hasCodex bool) {
+	fmt.Println()
+	boldCyan.Println("  👋 Welcome to DepartAI")
+	fmt.Println()
+	faint.Println("  DepartAI runs two AI coding agents in a relay on a shared task. They")
+	faint.Println("  review each other's work each turn and stop only when both agree it's")
+	faint.Println("  done — anchored to a spec they write together first.")
+	fmt.Println()
+	faint.Println("  Detected backends:")
+	printBackendStatus("claude", hasClaude)
+	printBackendStatus("codex", hasCodex)
+	fmt.Println()
+}
+
+func printBackendStatus(name string, installed bool) {
+	if installed {
+		boldGreen.Printf("    ✓ %s\n", name)
+	} else {
+		faint.Printf("    ✗ %s (not installed)\n", name)
+	}
+}
+
+// OnboardingNoBackends prints install guidance when no backend CLI is present.
+func OnboardingNoBackends(claudeHint, codexHint string) {
+	boldYellow.Println("  No agent backend is installed. DepartAI needs at least one:")
+	faint.Printf("    • %s\n", claudeHint)
+	faint.Printf("    • %s\n", codexHint)
+	faint.Println("  Install one and restart.")
+	fmt.Println()
+}
+
+// PromptOnboardingCreateConfig asks whether to write a global config seeded with
+// the detected backends. Returns true on yes, false on no / Ctrl+C.
+func PromptOnboardingCreateConfig(backend, betaBackend string) bool {
+	var setup string
+	if betaBackend != "" {
+		setup = fmt.Sprintf("Alpha → %s, Beta → %s (cross-vendor)", backend, betaBackend)
+	} else {
+		setup = fmt.Sprintf("both agents → %s", backend)
+	}
+	prompt := promptui.Select{
+		Label: fmt.Sprintf("Create a global config with %s?", setup),
+		Items: []string{"Yes, create it", "No, I'll configure later"},
+		Size:  2,
+		Templates: &promptui.SelectTemplates{
+			Label:    "  {{ . }}",
+			Active:   "  ▸ {{ . | cyan }}",
+			Inactive: "    {{ . | faint }}",
+			Selected: "  ✓ {{ . | green }}",
+		},
+		HideHelp: true,
+	}
+	idx, _, err := prompt.Run()
+	if err != nil {
+		return false
+	}
+	return idx == 0
+}
+
+// OnboardingConfigCreated confirms the seeded config was written.
+func OnboardingConfigCreated(path string) {
+	boldGreen.Printf("  ✓ Config saved to %s\n", path)
+	faint.Println("    Change it anytime with /config or /model.")
+	fmt.Println()
+}
 
 // WelcomeBanner prints the startup banner for interactive mode with config summary.
 // Shows effective per-agent models (override if set, else global) and the
