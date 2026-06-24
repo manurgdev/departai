@@ -1,6 +1,18 @@
 # DepartAI
 
-AI agent orchestrator CLI that runs two AI coding agents in sequential relay turns on a shared task. Each agent can use a **different backend and model** — e.g. Alpha on Claude opus, Beta on Codex. Agents hand off context through a shared task log, critically review each other's work, and only stop when both independently agree the task is complete.
+> Two AI coding agents — from different vendors — take turns on a shared task, critically reviewing each other until both agree the work is done.
+
+[![CI](https://github.com/manurgdev/departai/actions/workflows/ci.yml/badge.svg)](https://github.com/manurgdev/departai/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/manurgdev/departai?sort=semver)](https://github.com/manurgdev/departai/releases)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+[![Go](https://img.shields.io/github/go-mod/go-version/manurgdev/departai)](go.mod)
+![Backends](https://img.shields.io/badge/backends-Claude%20%7C%20Codex-blue)
+
+DepartAI is a **free, open-source CLI** that orchestrates two AI coding agents in a **deterministic, sequential relay** on a shared task. Each agent can use a **different backend and model** — e.g. Alpha on Claude Opus, Beta on OpenAI Codex — so two different model families catch each other's blind spots. Agents hand off context through a shared task log, review each other's work each turn, and stop only when **both independently agree** the task is complete *and* every acceptance criterion in a shared spec is checked.
+
+**Why this and not a bigger multi-model swarm?** Deliberate focus. DepartAI is a single self-contained Go binary — no IDE or plugin lock-in — running a simple, predictable two-agent relay with a spec as the contract. Less ceremony, more determinism.
+
+> **Bring your own backend.** DepartAI drives the official `claude` and/or `codex` CLIs, so you use your own LLM subscription(s). At least one must be installed and authenticated — see [Prerequisites](#prerequisites).
 
 ## How It Works
 
@@ -43,7 +55,9 @@ departai
 go install github.com/manurgdev/departai@latest
 ```
 
-> Requires Go 1.21+. The binary lands in `$(go env GOPATH)/bin` — make sure that's on your `$PATH`.
+> Requires Go 1.25+. The binary lands in `$(go env GOPATH)/bin` — make sure that's on your `$PATH`.
+
+Pre-built binaries for macOS, Linux, and Windows are also attached to each [GitHub release](https://github.com/manurgdev/departai/releases).
 
 ### Build from source
 
@@ -72,6 +86,15 @@ codex --version
 
 You can switch backends with `/config set backend codex` or `--backend codex`.
 
+> **First run:** the very first time you launch `departai` with no config, it shows a short welcome, detects which backends are installed, and offers to write a starter `~/.departai/config.yml` — defaulting to cross-vendor (Alpha → Claude, Beta → Codex) when both are available.
+
+Check your version anytime:
+
+```bash
+departai --version            # departai vX.Y.Z (os/arch)
+departai --version --verbose  # + commit, build date, Go toolchain
+```
+
 ## Usage
 
 ### Interactive mode (default)
@@ -91,9 +114,10 @@ The REPL shows a banner with current config and a prompt. Type `/` to see autoco
   Max turns    : unlimited
   Max turn time: no limit
   Log window   : unlimited
+  Retries      : 2
 
   Agents:
-    Alpha : claude / claude-opus-4-5
+    Alpha : claude / opus
     Beta  : codex / gpt-5.3-codex
 
   Type a task to start, or /help for commands.
@@ -203,6 +227,7 @@ Pasting large multi-line texts works as expected — bracketed paste is enabled,
 | `max-turns` | `/config set max-turns 20` | Max turns per run (0 = unlimited) |
 | `max-turn-duration` | `/config set max-turn-duration 15m` | Per-turn wall-clock budget (Go duration format, e.g. `15m`, `1h30m`); empty = no limit |
 | `log-window` | `/config set log-window 6` | Inject only the last N turns into each prompt (0 = full log). Reduces token cost on long tasks |
+| `max-retries` | `/config set max-retries 2` | Retries per turn on a transient backend failure (0 disables) |
 | `mode` | `/config set mode ask` | Active mode: `dev` (default) or `ask` |
 | `instructions` | `/config set instructions ./rules.md` | Custom instructions file |
 | `blocked-commands` | `/config set blocked-commands "WebFetch,rm -rf"` | Comma-separated list of tools/patterns agents must NOT use (soft enforcement) |
@@ -226,6 +251,9 @@ After any config change, a menu asks where to save: **Project** (default), **Glo
 | `--max-turns` | unlimited (0) | Max turns per run; 0 = no limit |
 | `--max-turn-duration` | no limit | Per-turn wall-clock budget (e.g. `15m`, `1h30m`); empty = no limit |
 | `--log-window` | unlimited (0) | Inject only the last N turns into each prompt; 0 = full log |
+| `--max-retries` | `2` | Retries per turn on a transient backend failure (rate limit, 5xx, network blip); 0 disables |
+| `--version` | — | Print version and exit (add `--verbose` for full build info) |
+| `--verbose` | `false` | More detailed output (e.g. full build info with `--version`) |
 
 ## Configuration
 
@@ -247,9 +275,10 @@ backend_beta: codex             # Alpha uses Claude, Beta uses Codex
 max_turns: 0                    # turn-count cap per run (0 = unlimited)
 max_turn_duration: 15m          # per-turn wall-clock budget (Go duration; empty = no limit)
 log_window: 6                   # inject only the last N turns into prompts (0 = full log)
+max_retries: 2                  # retries per turn on a transient backend failure (0 = disabled)
 
-model: claude-opus-4-5          # default model (model names depend on the backend)
-model_alpha: claude-opus-4-5    # per-agent model overrides (optional)
+model: opus                     # default model (alias or full name; depends on the backend)
+model_alpha: opus               # per-agent model overrides (optional)
 model_beta: gpt-5.3-codex       # each agent can use its backend's models
 
 # instructions_file: ./my-instructions.md
@@ -489,6 +518,29 @@ The full log on disk is never trimmed — the windowing only affects what's inje
 
 Default is `0` (no windowing) for backward compatibility. Enable on long-running projects.
 
+### Transient-error retry
+
+Backend CLIs occasionally fail transiently — rate limits (`429`/`529`), `5xx`, or network blips. Instead of aborting the whole relay on a momentary hiccup, departai retries the turn with exponential backoff + jitter:
+
+```yaml
+max_retries: 2   # default; 0 disables
+```
+
+The failure is classified from the exit error + stderr. **Transient** errors (rate limit, overloaded, 5xx, timeouts, connection reset) are retried; **permanent** ones (invalid model, auth failure, missing CLI, cancelled by ESC/timeout) abort immediately — retrying them wouldn't help. On exhausting the retries, the turn fails as before. Configurable via `max_retries`, `--max-retries`, or `/config set max-retries`.
+
+### Context-window awareness
+
+On long tasks the prompt (instructions + spec + task log) grows turn by turn and can approach the model's context window. Before each turn, departai estimates the prompt size and, once per run, warns when it crosses ~80% of the window — suggesting `log_window` to bound growth:
+
+```
+⚠  Agent Alpha's prompt is ~175k tokens — 87% of the ~200k context window
+   Bound prompt growth by windowing the task log: /config set log-window 6
+```
+
+The estimate is a backend-agnostic heuristic (it doesn't need a tokenizer); the spec preserves long-term state, so older turns can be safely elided.
+
+> **Large outputs:** a single backend stream line is capped at 16 MB by default (raise with `DEPARTAI_MAX_STREAM_LINE_MB`). On overflow, departai surfaces a clear error rather than silently truncating the turn.
+
 ## Agent Protocol
 
 Agents follow a built-in protocol (overridable with `--instructions`):
@@ -611,10 +663,14 @@ departai/
 ├── go.mod / go.sum
 └── internal/
     ├── cli/
-    │   ├── cli.go              # flag parsing, config loading, mode selection
-    │   └── interactive.go      # REPL, go-prompt autocomplete, slash commands, task state
+    │   ├── cli.go              # flag parsing, config layering, --version, backend availability check
+    │   ├── interactive.go      # REPL loop, slash commands, task state, history persistence
+    │   ├── repl_model.go       # custom bubbletea REPL (textarea + popover autocomplete)
+    │   └── onboarding.go       # first-run detection + starter-config seeding
+    ├── version/
+    │   └── version.go          # build/version info (ldflags + runtime/debug fallback)
     ├── config/
-    │   └── config.go           # YAML config: load, save, layered merge, per-agent models
+    │   └── config.go           # YAML config: load, save, layered merge, per-agent models, retries
     ├── tui/
     │   ├── agentview.go        # bubbletea model: streaming + review + auto-continue
     │   └── style.go            # lipgloss styles
@@ -629,30 +685,34 @@ departai/
     │   │   └── stream_test.go  # parser tests (legacy + partial-message paths)
     │   └── codex/
     │       ├── codex.go        # Codex CLI implementation + model validation
-    │       └── stream.go       # Codex JSONL parser
+    │       ├── stream.go       # Codex JSONL parser
+    │       └── *_test.go       # parser + ValidateModel tests
     ├── orchestrator/
     │   └── orchestrator.go     # turn loop, spec pre-turns, prompt builder, consensus, ESC-to-stop,
     │                           # ErrAgentBlocked / ErrTurnTimeout / ErrOscillationDetected,
-    │                           # scope + oscillation detection
+    │                           # scope + oscillation detection, transient-error retry,
+    │                           # context-window awareness
     └── tasklog/
-        ├── tasklog.go          # task directory, log read/write/parse, load, list, directives,
+        ├── tasklog.go          # task directory, log read/write/parse, load (+corrupt-log recovery),
         │                       # spec.md primitives, windowed content, touched-files sidecars,
         │                       # synthetic timeout entries
-        └── tasklog_test.go     # parsing, spec, windowing, scope, relocate-safety tests
+        └── *_test.go           # parsing, spec, windowing, scope, relocate-safety, recovery tests
 ```
 
 ### Key dependencies
 
 | Package | Purpose |
 |---------|---------|
-| `knz/bubbline` | Interactive REPL with multi-line input, autocomplete, persistent history |
-| `charmbracelet/bubbletea` | TUI for streaming agent output (also powers bubbline) |
-| `charmbracelet/bubbles` | Viewport component for scrollable content |
+| `charmbracelet/bubbletea` | TUI for the streaming agent view and the custom REPL |
+| `charmbracelet/bubbles` | `textarea` (REPL input) + `viewport` (scrollable content) |
 | `charmbracelet/lipgloss` | TUI styling |
+| `knz/bubbline/history` | Persistent REPL command history (`~/.departai/history.txt`) |
 | `fatih/color` | ANSI colors for non-TUI output |
 | `briandowns/spinner` | Spinner for model validation |
-| `manifoldco/promptui` | Arrow-key menus (save scope, task resume) |
+| `manifoldco/promptui` | Arrow-key menus (save scope, task resume, onboarding) |
 | `gopkg.in/yaml.v3` | Config file parsing |
+
+> The REPL is built directly on `bubbles/textarea` (custom multi-line input + inline command popover); only the `history` package from `knz/bubbline` is used, for persistent history.
 
 ### Adding a new agent backend
 
@@ -677,3 +737,21 @@ Then add a case to `buildAgents()` in `orchestrator.go` and select it with `--ba
 Both backends implement the `agent.StreamingAgent` interface, providing live tool-call streaming via the bubbletea TUI. Model validation is backend-specific — each backend's `ValidateModel` function runs a minimal test prompt to verify the model name is accepted.
 
 The Claude backend uses `--include-partial-messages` to receive token-level deltas (`stream_event` lines with `content_block_start` / `content_block_delta` / `content_block_stop` sub-events). The parser is stateful: it accumulates deltas per content block and emits `agent.StreamEvent`s carrying a `BlockID` so the TUI can update the same entry in place as text grows. This eliminates the "silent gap" the TUI used to show when the LLM generated a single large block (e.g. a `Write` of an 80 KB spec). The Codex backend continues to emit whole-block events; if a future Codex release adds a partial-stream mode, the same pattern can be applied.
+
+## Contributing
+
+Contributions are welcome — issues, ideas, and pull requests. See [ROADMAP.md](ROADMAP.md) for where the project is headed and what's up next.
+
+Before submitting a PR, make sure the basics pass:
+
+```bash
+gofmt -l .        # should print nothing
+go vet ./...
+go test ./...     # backend-CLI tests auto-skip when claude/codex aren't installed
+```
+
+A full `CONTRIBUTING.md` (how to add a backend, coding conventions) is on the way.
+
+## License
+
+DepartAI is free and open-source software, released under the [MIT License](LICENSE).
