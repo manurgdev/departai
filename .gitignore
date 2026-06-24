@@ -1,6 +1,9 @@
 # Binary
 departai
 
+# GoReleaser build artifacts
+dist/
+
 # OS
 .DS_Store
 
